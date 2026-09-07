@@ -8,10 +8,7 @@ const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Permitir que la web de Lovable se conecte
 app.use(cors());
-
-// Carpeta temporal en la memoria RAM del servidor
 const upload = multer({ dest: '/tmp/' });
 
 app.post('/v1/compress', upload.single('file'), (req, res) => {
@@ -20,13 +17,13 @@ app.post('/v1/compress', upload.single('file'), (req, res) => {
     const inputPath = req.file.path;
     const outputPath = path.join('/tmp', `comprimido_${Date.now()}.pdf`);
 
-    // Traducir el nivel de Lovable a la potencia de Ghostscript
-    let gsQuality = '/ebook'; // recommended (buena calidad, peso bajo)
-    if (req.body.level === 'extreme') gsQuality = '/screen'; // calidad baja, peso pluma
-    if (req.body.level === 'low') gsQuality = '/printer'; // alta calidad
+    // Traducir el nivel a DPIs estrictos para forzar la reducción de píxeles
+    let dpi = 144; // Recomendada (equivalente al 60-65% de ahorro de iLovePDF)
+    if (req.body.level === 'extreme') dpi = 72; // Extrema
+    if (req.body.level === 'low') dpi = 200; // Baja
 
-    // Comando industrial idéntico al de iLovePDF
-    const gsCommand = `gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=${gsQuality} -dNOPAUSE -dQUIET -dBATCH -sOutputFile=${outputPath} ${inputPath}`;
+    // Comando industrial agresivo: fuerza el remuestreo de TODAS las imágenes a JPEG
+    const gsCommand = `gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dDownsampleColorImages=true -dColorImageResolution=${dpi} -dDownsampleGrayImages=true -dGrayImageResolution=${dpi} -dDownsampleMonoImages=true -dMonoImageResolution=${dpi} -dAutoFilterColorImages=false -dColorImageFilter=/DCTEncode -dAutoFilterGrayImages=false -dGrayImageFilter=/DCTEncode -dNOPAUSE -dQUIET -dBATCH -sOutputFile=${outputPath} ${inputPath}`;
 
     exec(gsCommand, (error) => {
         if (error) {
@@ -35,9 +32,8 @@ app.post('/v1/compress', upload.single('file'), (req, res) => {
             return res.status(500).send('Error interno de compresión');
         }
 
-        // Devolver el archivo procesado al abogado
         res.download(outputPath, 'pdfcadabra-pro.pdf', () => {
-            // DESTRUCCIÓN INMEDIATA: Garantía de secreto profesional
+            // Destrucción inmediata
             if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
             if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
         });

@@ -1,7 +1,7 @@
-FROM node:18-bullseye-slim
+FROM node:20-bookworm-slim
 
-# Instalar Ghostscript (el motor industrial de compresión)
-RUN apt-get update && apt-get install -y ghostscript && rm -rf /var/lib/apt/lists/*
+# Instalamos Ghostscript en un sistema Linux más moderno
+RUN apt-get update && apt-get install -y --fix-missing ghostscript && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY package*.json ./

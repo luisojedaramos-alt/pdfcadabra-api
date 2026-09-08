@@ -54,7 +54,7 @@ app.post('/v1/thumbnails', upload.single('file'), (req, res) => {
 
     // pdftoppm: Comando industrial para convertir PDFs a JPG a altísima velocidad
     // -jpeg: Formato salida | -scale-to 400: Ancho de 400px (ideal para miniaturas UI)
-    const cmd = `pdftoppm -jpeg -scale-to 400 "${inputPath}" "${outputPrefix}"`;
+    const cmd = \pdftoppm -jpeg -scale-to 1600 "${inputPath}" "${outputPrefix}"`;`
 
     exec(cmd, (error) => {
         if (error) {

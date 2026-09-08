@@ -106,19 +106,25 @@ app.post('/v1/redact/search', upload.single('file'), (req, res) => {
 
     const inputPath = req.file.path;
     const patterns = req.body.patterns || '{}'; 
+    
+    // GUARDAR PATRONES EN ARCHIVO TEMPORAL PARA EVITAR ERRORES DE TERMINAL
+    const patternsPath = path.join('/tmp', `patterns_${Date.now()}.json`);
+    fs.writeFileSync(patternsPath, patterns);
 
-    const cmd = `python3 redact.py "search" "${inputPath}" '${patterns}'`;
+    const cmd = `python3 redact.py "search" "${inputPath}" "${patternsPath}"`;
 
     exec(cmd, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
-        // En búsqueda no borramos el PDF, lo guardamos para el paso final
+        if (fs.existsSync(patternsPath)) fs.unlinkSync(patternsPath); // Limpieza de seguridad
+
         if (error) {
-            console.error('Error buscando:', error);
+            console.error('Error buscando:', error, stderr);
             return res.status(500).send('Fallo en el escaneo');
         }
         try {
             const results = JSON.parse(stdout);
             res.json({ results, filePath: inputPath });
         } catch (e) {
+            console.error('Error parseando JSON:', e);
             res.status(500).send('Error procesando resultados');
         }
     });
@@ -130,14 +136,19 @@ app.post('/v1/redact/search', upload.single('file'), (req, res) => {
 app.post('/v1/redact/apply', express.json(), (req, res) => {
     const { filePath, items } = req.body;
     
-    if (!fs.existsSync(filePath)) return res.status(400).send('Archivo no encontrado. Vuelve a subirlo.');
+    if (!fs.existsSync(filePath)) return res.status(400).send('Archivo no encontrado en el servidor. Vuelve a intentarlo.');
     
     const outputPath = path.join('/tmp', `censurado_${Date.now()}.pdf`);
-    const itemsJson = JSON.stringify(items);
+    
+    // GUARDAR COORDENADAS EN ARCHIVO TEMPORAL
+    const itemsPath = path.join('/tmp', `items_${Date.now()}.json`);
+    fs.writeFileSync(itemsPath, JSON.stringify(items));
 
-    const cmd = `python3 redact.py "apply" "${filePath}" '${outputPath}' '${itemsJson}'`;
+    const cmd = `python3 redact.py "apply" "${filePath}" "${outputPath}" "${itemsPath}"`;
 
     exec(cmd, (error) => {
+        if (fs.existsSync(itemsPath)) fs.unlinkSync(itemsPath); // Limpieza de seguridad
+
         if (error) {
             console.error('Error censurando:', error);
             if (fs.existsSync(filePath)) fs.unlinkSync(filePath);

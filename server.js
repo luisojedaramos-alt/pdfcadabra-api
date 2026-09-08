@@ -137,29 +137,34 @@ app.post('/v1/redact/search', upload.single('file'), (req, res) => {
 });
 
 // ==========================================
-// 3B. MOTOR DE EJECUCIÓN (Destrucción Quirúrgica)
+// 3B. MOTOR DE EJECUCIÓN (Destrucción Quirúrgica - STATELESS)
 // ==========================================
-app.post('/v1/redact/apply', express.json(), (req, res) => {
-    const { filePath, items } = req.body;
-    
-    if (!fs.existsSync(filePath)) return res.status(400).json({ error: 'Archivo expirado. Súbelo de nuevo.' });
+app.post('/v1/redact/apply', upload.single('file'), (req, res) => {
+    // El servidor recibe el archivo fresco desde el navegador, sin importar cuánto tiempo haya pasado
+    if (!req.file) return res.status(400).json({ error: 'No se recibió el archivo original.' });
+
+    const inputPath = req.file.path;
+    const itemsRaw = req.body.items || '[]';
     
     const outputPath = path.join('/tmp', `censurado_${Date.now()}.pdf`);
     const itemsPath = path.join('/tmp', `items_${Date.now()}.json`);
-    fs.writeFileSync(itemsPath, JSON.stringify(items));
+    
+    fs.writeFileSync(itemsPath, itemsRaw);
 
-    const cmd = `python3 redact.py "apply" "${filePath}" "${outputPath}" "${itemsPath}"`;
+    const cmd = `python3 redact.py "apply" "${inputPath}" "${outputPath}" "${itemsPath}"`;
 
     exec(cmd, (error) => {
         if (fs.existsSync(itemsPath)) fs.unlinkSync(itemsPath);
 
         if (error) {
-            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            console.error('Error censurando:', error);
+            if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
             return res.status(500).json({ error: 'Fallo al aplicar censura.' });
         }
 
         res.download(outputPath, 'pdfcadabra-seguro.pdf', () => {
-            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            // Destrucción inmediata de los archivos temporales
+            if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
             if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
         });
     });

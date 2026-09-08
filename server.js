@@ -102,30 +102,36 @@ app.post('/v1/thumbnails', upload.single('file'), (req, res) => {
 // 3A. MOTOR DE ESCANEO (Búsqueda con Contexto)
 // ==========================================
 app.post('/v1/redact/search', upload.single('file'), (req, res) => {
-    if (!req.file) return res.status(400).send('No file uploaded.');
+    if (!req.file) return res.status(400).json({ error: 'No se ha subido ningún archivo.' });
 
     const inputPath = req.file.path;
     const patterns = req.body.patterns || '{}'; 
     
-    // GUARDAR PATRONES EN ARCHIVO TEMPORAL PARA EVITAR ERRORES DE TERMINAL
     const patternsPath = path.join('/tmp', `patterns_${Date.now()}.json`);
+    const resultsPath = path.join('/tmp', `results_${Date.now()}.json`);
+    
     fs.writeFileSync(patternsPath, patterns);
 
-    const cmd = `python3 redact.py "search" "${inputPath}" "${patternsPath}"`;
+    const cmd = `python3 redact.py "search" "${inputPath}" "${patternsPath}" "${resultsPath}"`;
 
     exec(cmd, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
-        if (fs.existsSync(patternsPath)) fs.unlinkSync(patternsPath); // Limpieza de seguridad
+        if (fs.existsSync(patternsPath)) fs.unlinkSync(patternsPath);
 
         if (error) {
-            console.error('Error buscando:', error, stderr);
-            return res.status(500).send('Fallo en el escaneo');
+            console.error('Error de Python:', stderr);
+            return res.status(500).json({ error: 'El motor no pudo procesar este documento.' });
         }
+        
         try {
-            const results = JSON.parse(stdout);
+            if (!fs.existsSync(resultsPath)) throw new Error('Sin archivo de resultados');
+            const resultsRaw = fs.readFileSync(resultsPath, 'utf8');
+            const results = JSON.parse(resultsRaw);
+            fs.unlinkSync(resultsPath); 
+            
             res.json({ results, filePath: inputPath });
         } catch (e) {
-            console.error('Error parseando JSON:', e);
-            res.status(500).send('Error procesando resultados');
+            console.error('Error crítico leyendo resultados:', e);
+            res.status(500).json({ error: 'El servidor no ha podido analizar el documento.' });
         }
     });
 });
@@ -136,23 +142,20 @@ app.post('/v1/redact/search', upload.single('file'), (req, res) => {
 app.post('/v1/redact/apply', express.json(), (req, res) => {
     const { filePath, items } = req.body;
     
-    if (!fs.existsSync(filePath)) return res.status(400).send('Archivo no encontrado en el servidor. Vuelve a intentarlo.');
+    if (!fs.existsSync(filePath)) return res.status(400).json({ error: 'Archivo expirado. Súbelo de nuevo.' });
     
     const outputPath = path.join('/tmp', `censurado_${Date.now()}.pdf`);
-    
-    // GUARDAR COORDENADAS EN ARCHIVO TEMPORAL
     const itemsPath = path.join('/tmp', `items_${Date.now()}.json`);
     fs.writeFileSync(itemsPath, JSON.stringify(items));
 
     const cmd = `python3 redact.py "apply" "${filePath}" "${outputPath}" "${itemsPath}"`;
 
     exec(cmd, (error) => {
-        if (fs.existsSync(itemsPath)) fs.unlinkSync(itemsPath); // Limpieza de seguridad
+        if (fs.existsSync(itemsPath)) fs.unlinkSync(itemsPath);
 
         if (error) {
-            console.error('Error censurando:', error);
             if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-            return res.status(500).send('Fallo al aplicar censura');
+            return res.status(500).json({ error: 'Fallo al aplicar censura.' });
         }
 
         res.download(outputPath, 'pdfcadabra-seguro.pdf', () => {

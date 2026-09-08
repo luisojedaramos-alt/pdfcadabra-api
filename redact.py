@@ -3,7 +3,6 @@ import sys
 import json
 import re
 
-# Silenciar las advertencias internas de C/C++ de la librería
 fitz.TOOLS.mupdf_display_errors(False)
 
 try:
@@ -24,6 +23,10 @@ try:
             page = doc[page_num]
             text = page.get_text("text")
             
+            # Extraer dimensiones exactas del folio
+            p_width = page.rect.width
+            p_height = page.rect.height
+            
             for category, pattern in patterns.items():
                 try:
                     for match in re.finditer(pattern, text):
@@ -39,6 +42,8 @@ try:
                             results.append({
                                 "id": f"p{page_num}_{area.x0}_{area.y0}_{category}",
                                 "page": page_num,
+                                "page_width": p_width,
+                                "page_height": p_height,
                                 "text": val,
                                 "context": f"...{context}...",
                                 "category": category,

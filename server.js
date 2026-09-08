@@ -97,4 +97,30 @@ app.post('/v1/thumbnails', upload.single('file'), (req, res) => {
     });
 });
 
+// ==========================================
+// 3. MOTOR DE CENSURA LEGAL (PyMuPDF)
+// ==========================================
+app.post('/v1/redact', upload.single('file'), (req, res) => {
+    if (!req.file) return res.status(400).send('No file uploaded.');
+
+    const inputPath = req.file.path;
+    const outputPath = path.join('/tmp', `censurado_${Date.now()}.pdf`);
+    const patterns = req.body.patterns || '[]'; // Array de regex en formato string
+
+    const cmd = `python3 redact.py "${inputPath}" "${outputPath}" '${patterns}'`;
+
+    exec(cmd, (error) => {
+        if (error) {
+            console.error('Error censurando:', error);
+            if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+            return res.status(500).send('Fallo en el motor de censura');
+        }
+
+        res.download(outputPath, 'pdfcadabra-seguro.pdf', () => {
+            if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+            if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+        });
+    });
+});
+
 app.listen(port, () => console.log(`Motor PDFcadabra escuchando en el puerto ${port}`));

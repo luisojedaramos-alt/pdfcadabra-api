@@ -7,8 +7,11 @@ action = sys.argv[1]
 input_path = sys.argv[2]
 
 if action == "search":
-    # Modo Escaneo: Busca y extrae el contexto
-    patterns = json.loads(sys.argv[3]) # Diccionario { "Categoria": "Regex" }
+    patterns_path = sys.argv[3]
+    # Leer las fórmulas de forma segura desde el archivo temporal
+    with open(patterns_path, 'r', encoding='utf-8') as f:
+        patterns = json.load(f)
+    
     doc = fitz.open(input_path)
     results = []
     
@@ -22,31 +25,34 @@ if action == "search":
                     val = match.group().strip()
                     if not val: continue
                     
-                    # Extraer contexto (+/- 25 caracteres alrededor)
+                    # Extraer contexto (+/- 25 caracteres)
                     start = max(0, match.start() - 25)
                     end = min(len(text), match.end() + 25)
                     context = text[start:end].replace('\n', ' ').strip()
                     
-                    # Localizar coordenadas
                     areas = page.search_for(val)
                     for area in areas:
                         results.append({
                             "id": f"p{page_num}_{area.x0}_{area.y0}",
-                            "page": page_num, # Índice interno (0 = pág 1)
+                            "page": page_num,
                             "text": val,
                             "context": f"...{context}...",
                             "category": category,
                             "rect": [area.x0, area.y0, area.x1, area.y1]
                         })
-            except:
+            except Exception as e:
                 pass
                 
     print(json.dumps(results))
 
 elif action == "apply":
-    # Modo Ejecución: Destruye el texto en las coordenadas exactas confirmadas
     output_path = sys.argv[3]
-    items = json.loads(sys.argv[4]) # Lista de {page, rect}
+    items_path = sys.argv[4]
+    
+    # Leer las coordenadas desde el archivo temporal
+    with open(items_path, 'r', encoding='utf-8') as f:
+        items = json.load(f)
+        
     doc = fitz.open(input_path)
     
     for item in items:

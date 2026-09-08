@@ -97,30 +97,59 @@ app.post('/v1/thumbnails', upload.single('file'), (req, res) => {
     });
 });
 
+
 // ==========================================
-// 3. MOTOR DE CENSURA LEGAL (PyMuPDF)
+// 3A. MOTOR DE ESCANEO (Búsqueda con Contexto)
 // ==========================================
-app.post('/v1/redact', upload.single('file'), (req, res) => {
+app.post('/v1/redact/search', upload.single('file'), (req, res) => {
     if (!req.file) return res.status(400).send('No file uploaded.');
 
     const inputPath = req.file.path;
-    const outputPath = path.join('/tmp', `censurado_${Date.now()}.pdf`);
-    const patterns = req.body.patterns || '[]'; // Array de regex en formato string
+    const patterns = req.body.patterns || '{}'; 
 
-    const cmd = `python3 redact.py "${inputPath}" "${outputPath}" '${patterns}'`;
+    const cmd = `python3 redact.py "search" "${inputPath}" '${patterns}'`;
+
+    exec(cmd, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+        // En búsqueda no borramos el PDF, lo guardamos para el paso final
+        if (error) {
+            console.error('Error buscando:', error);
+            return res.status(500).send('Fallo en el escaneo');
+        }
+        try {
+            const results = JSON.parse(stdout);
+            res.json({ results, filePath: inputPath });
+        } catch (e) {
+            res.status(500).send('Error procesando resultados');
+        }
+    });
+});
+
+// ==========================================
+// 3B. MOTOR DE EJECUCIÓN (Destrucción Quirúrgica)
+// ==========================================
+app.post('/v1/redact/apply', express.json(), (req, res) => {
+    const { filePath, items } = req.body;
+    
+    if (!fs.existsSync(filePath)) return res.status(400).send('Archivo no encontrado. Vuelve a subirlo.');
+    
+    const outputPath = path.join('/tmp', `censurado_${Date.now()}.pdf`);
+    const itemsJson = JSON.stringify(items);
+
+    const cmd = `python3 redact.py "apply" "${filePath}" '${outputPath}' '${itemsJson}'`;
 
     exec(cmd, (error) => {
         if (error) {
             console.error('Error censurando:', error);
-            if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-            return res.status(500).send('Fallo en el motor de censura');
+            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            return res.status(500).send('Fallo al aplicar censura');
         }
 
         res.download(outputPath, 'pdfcadabra-seguro.pdf', () => {
-            if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
             if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
         });
     });
 });
+
 
 app.listen(port, () => console.log(`Motor PDFcadabra escuchando en el puerto ${port}`));

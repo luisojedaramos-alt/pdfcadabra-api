@@ -18,22 +18,21 @@ for page in doc:
     text = page.get_text("text")
     words_to_redact = set()
     
-    # 1. Encontrar todas las palabras que coinciden con los patrones/regex
     for pattern in patterns:
         try:
-            matches = re.finditer(pattern, text, re.IGNORECASE)
+            # ELIMINADO el re.IGNORECASE global. La inteligencia ahora va en el patrón.
+            matches = re.finditer(pattern, text)
             for match in matches:
-                words_to_redact.add(match.group())
+                words_to_redact.add(match.group().strip())
         except:
             pass
             
-    # 2. Localizar coordenadas exactas y aplicar la marca
     for word in words_to_redact:
+        if not word: continue
         areas = page.search_for(word)
         for area in areas:
             page.add_redact_annot(area, fill=(0, 0, 0))
             
-    # 3. APLICAR CENSURA (Destruye el texto inferior, irreversible)
     page.apply_redactions()
 
 doc.save(output_path, garbage=3, deflate=True)

@@ -55,7 +55,7 @@ try:
         with open(results_path, 'w', encoding='utf-8') as f:
             json.dump(results, f)
 
-    elif action == "apply":
+   elif action == "apply":
         output_path = sys.argv[3]
         items_path = sys.argv[4]
         
@@ -64,6 +64,7 @@ try:
             
         doc = fitz.open(input_path)
         
+        # 1. Aplicar los rectángulos de censura
         for item in items:
             page = doc[item["page"]]
             rect = fitz.Rect(item["rect"])
@@ -72,7 +73,18 @@ try:
         for page in doc:
             page.apply_redactions()
             
-        doc.save(output_path, garbage=3, deflate=True)
+        # 2. Limpieza forense de metadatos (Elimina huellas del autor original)
+        doc.set_metadata({
+            "creator": "PDFcadabra",
+            "producer": "PDFcadabra LegalTech",
+            "author": "",
+            "title": "",
+            "subject": "",
+            "keywords": ""
+        })
+        
+        # 3. Guardado con destrucción profunda (garbage=4 elimina objetos huérfanos)
+        doc.save(output_path, garbage=4, deflate=True, clean=True)
 
 except Exception as e:
     sys.exit(1)

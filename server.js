@@ -11,7 +11,10 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // 1. Configuración de middlewares y límites de carga pesada (100 MB para LexNET)
-app.use(cors());
+// AÑADIDO: exposedHeaders para que React pueda leer nuestras alertas de censura
+app.use(cors({
+    exposedHeaders: ['X-Redact-Warnings']
+}));
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
@@ -89,27 +92,48 @@ app.post('/v1/redact/apply', upload.single('file'), (req, res) => {
     const baseId = uuidv4();
     const itemsPath = path.join('/tmp', `items_${baseId}.json`);
     const outputPath = path.join('/tmp', `censored_${baseId}.pdf`);
+    const resultsPath = path.join('/tmp', `redact_results_${baseId}.json`); // NUEVO: Archivo de reporte
 
     try {
         const itemsData = typeof req.body.items === 'string' ? req.body.items : JSON.stringify(req.body.items);
         fs.writeFileSync(itemsPath, itemsData, 'utf-8');
 
-        const cmd = `python3 redact.py apply "${inputPath}" "${outputPath}" "${itemsPath}"`;
+        // NUEVO: Se añade el quinto argumento (resultsPath) al comando Python
+        const cmd = `python3 redact.py apply "${inputPath}" "${outputPath}" "${itemsPath}" "${resultsPath}"`;
 
         exec(cmd, (error, stdout, stderr) => {
             if (error) {
                 console.error("Error en censura:", stderr);
-                secureCleanup([inputPath, itemsPath, outputPath]);
+                secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
                 return res.status(500).json({ error: 'Error aplicando la censura forense.' });
+            }
+
+            // NUEVO: Leer el reporte para ver si falló alguna caja de censura específica
+            let warnings = [];
+            try {
+                if (fs.existsSync(resultsPath)) {
+                    const report = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
+                    if (report.failed && report.failed.length > 0) {
+                        warnings = report.failed;
+                        console.warn(`[Redact] ${warnings.length} censuras no se pudieron aplicar:`, warnings);
+                    }
+                }
+            } catch (e) {
+                console.error("No se pudo leer el reporte de fallos parciales:", e);
+            }
+
+            // Si hay fallos, los inyectamos en las cabeceras HTTP
+            if (warnings.length > 0) {
+                res.setHeader('X-Redact-Warnings', encodeURIComponent(JSON.stringify(warnings)));
             }
 
             // Descarga y borrado instantáneo tras confirmar el envío
             res.sendFile(outputPath, (err) => {
-                secureCleanup([inputPath, itemsPath, outputPath]);
+                secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
             });
         });
     } catch (e) {
-        secureCleanup([inputPath, itemsPath, outputPath]);
+        secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
         res.status(500).json({ error: 'Error del servidor preparando la censura.' });
     }
 });

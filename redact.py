@@ -27,31 +27,34 @@ try:
             p_width = page.rect.width
             p_height = page.rect.height
             
-            # 1. Almacenar resultados brutos
             raw_rects = []
             
             for category, pattern in patterns.items():
                 try:
-                    # Extraer solo los textos únicos que hacen match para no multiplicar las búsquedas
-                    matched_strings = set()
+                    # Encontrar matches y obtener las posiciones reales en el texto
                     for match in re.finditer(pattern, text):
                         val = match.group().strip()
-                        if val:
-                            matched_strings.add(val)
-                    
-                    for val in matched_strings:
-                        # Extraer contexto
-                        idx = text.find(val)
-                        context = ""
-                        if idx != -1:
-                            start = max(0, idx - 25)
-                            end = min(len(text), idx + len(val) + 25)
-                            context = text[start:end].replace('\n', ' ').strip()
+                        if not val:
+                            continue
+                            
+                        # Avanzamos la búsqueda de contexto usando text.find con offset
+                        # Esto garantiza un contexto real si el dato aparece múltiples veces.
+                        start_search = 0
                         
                         areas = page.search_for(val)
                         for area in areas:
+                            # Buscar el índice del texto a partir de start_search
+                            idx = text.find(val, start_search)
+                            context = ""
+                            
+                            if idx != -1:
+                                start = max(0, idx - 30)
+                                end = min(len(text), idx + len(val) + 30)
+                                context = text[start:end].replace('\n', ' ').strip()
+                                start_search = idx + len(val)
+                                
                             raw_rects.append({
-                                "id": str(uuid.uuid4()), # ID robusto y único
+                                "id": str(uuid.uuid4()),
                                 "page": page_num,
                                 "page_width": p_width,
                                 "page_height": p_height,
@@ -63,40 +66,47 @@ try:
                 except Exception:
                     pass 
             
-            # 2. Deduplicación inteligente de coordenadas (Resuelve el bug de los duplicados)
+            # 2. Deduplicación estricta usando el área completa y el texto
             seen_coordinates = set()
             for r in raw_rects:
-                # Creamos una huella basada en la posición redondeada para evitar duplicados milimétricos
-                coord_hash = f"{r['page']}_{round(r['rect'][0], 1)}_{round(r['rect'][1], 1)}"
+                coord_hash = f"{r['page']}_{round(r['rect'][0], 1)}_{round(r['rect'][1], 1)}_{round(r['rect'][2], 1)}_{round(r['rect'][3], 1)}_{r['text']}"
                 if coord_hash not in seen_coordinates:
                     seen_coordinates.add(coord_hash)
                     results.append(r)
                     
         with open(results_path, 'w', encoding='utf-8') as f:
-            json.dump(results, f)
+            json.dump({"results": results}, f)
 
     elif action == "apply":
         output_path = sys.argv[3]
         items_path = sys.argv[4]
+        results_json_path = sys.argv[5] if len(sys.argv) > 5 else None
         
         with open(items_path, 'r', encoding='utf-8') as f:
             items = json.load(f)
             
         doc = fitz.open(input_path)
         
-        # Blindaje anticaídas: Si una caja es inválida, se ignora en lugar de bloquear el proceso
+        failed_items = []
+        applied_count = 0
+        
+        # Blindaje anticaídas con registro de fallos
         for item in items:
             try:
                 page = doc[item["page"]]
                 rect = fitz.Rect(item["rect"])
+                # Forzamos opacidad absoluta en el relleno
                 page.add_redact_annot(rect, fill=(0, 0, 0))
-            except Exception:
-                continue
+                applied_count += 1
+            except Exception as e:
+                failed_items.append({"id": item.get("id"), "error": str(e)})
             
         for page in doc:
-            page.apply_redactions()
+            # CRÍTICO: images=fitz.PDF_REDACT_IMAGE_PIXELS garantiza la destrucción 
+            # a nivel de píxel del escaneo subyacente. No se puede recuperar el dato tapado.
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
             
-        # Limpieza forense agresiva (XMP, Adjuntos, JS)
+        # Limpieza forense agresiva (XMP, JS, Objetos huérfanos)
         try:
             doc.scrub()
         except AttributeError:
@@ -112,6 +122,13 @@ try:
         })
         
         doc.save(output_path, garbage=4, deflate=True, clean=True)
+        
+        if results_json_path:
+            with open(results_json_path, 'w', encoding='utf-8') as f:
+                json.dump({"success": True, "applied": applied_count, "failed": failed_items}, f)
 
 except Exception as e:
+    # Imprimir para que server.js lo capture en el stderr
+    print(f"Error crítico en redact.py: {str(e)}", file=sys.stderr)
     sys.exit(1)
+```"

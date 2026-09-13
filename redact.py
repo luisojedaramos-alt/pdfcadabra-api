@@ -131,4 +131,3 @@ except Exception as e:
     # Imprimir para que server.js lo capture en el stderr
     print(f"Error crítico en redact.py: {str(e)}", file=sys.stderr)
     sys.exit(1)
-```"

@@ -8,7 +8,7 @@ WORKDIR /app
 # Crear entorno virtual de Python e instalar PyMuPDF
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install PyMuPDF
+RUN pip install PyMuPDF==1.28.2
 
 COPY package*.json ./
 RUN npm install

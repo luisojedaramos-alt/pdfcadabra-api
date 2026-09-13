@@ -109,26 +109,42 @@ app.post('/v1/redact/apply', upload.single('file'), (req, res) => {
             }
 
             // NUEVO: Leer el reporte para ver si falló alguna caja de censura específica
-            let warnings = [];
+            let report = null;
             try {
                 if (fs.existsSync(resultsPath)) {
-                    const report = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
-                    if (report.failed && report.failed.length > 0) {
-                        warnings = report.failed;
-                        console.warn(`[Redact] ${warnings.length} censuras no se pudieron aplicar:`, warnings);
-                    }
+                    report = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
                 }
             } catch (e) {
                 console.error("No se pudo leer el reporte de fallos parciales:", e);
             }
 
-            // Si hay fallos, los inyectamos en las cabeceras HTTP
-            if (warnings.length > 0) {
-                res.setHeader('X-Redact-Warnings', encodeURIComponent(JSON.stringify(warnings)));
+            const failed = (report && report.failed) || [];
+            const applied = report ? report.applied : 0;
+            const totalRequested = applied + failed.length;
+
+            // CRÍTICO: si se pidieron censuras y NINGUNA se aplicó, el PDF de salida
+            // es idéntico al original sin censurar. Nunca lo enviamos como si fuera un éxito.
+            if (totalRequested > 0 && applied === 0) {
+                console.error(`[Redact] Fallaron todas las censuras (${failed.length}/${totalRequested}):`, failed);
+                secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
+                return res.status(422).json({
+                    error: 'No se pudo aplicar ninguna censura. El documento no se ha modificado y no ha sido enviado.',
+                    failed
+                });
+            }
+
+            // Si hay fallos parciales, los inyectamos en las cabeceras HTTP
+            if (failed.length > 0) {
+                console.warn(`[Redact] ${failed.length} censuras no se pudieron aplicar:`, failed);
+                res.setHeader('X-Redact-Warnings', encodeURIComponent(JSON.stringify(failed)));
             }
 
             // Descarga y borrado instantáneo tras confirmar el envío
             res.sendFile(outputPath, (err) => {
+                if (err && !res.headersSent) {
+                    console.error("Error enviando el documento censurado:", err);
+                    res.status(500).json({ error: 'Error enviando el documento censurado.' });
+                }
                 secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
             });
         });

@@ -19,40 +19,54 @@ try:
         
         doc = fitz.open(input_path)
         results = []
-        
+        errors = []
+
+        # Precompilamos los patrones una sola vez: un regex inválido se
+        # reporta como error de categoría en vez de tumbar la búsqueda o
+        # descartarse en silencio en cada página.
+        compiled_patterns = {}
+        for category, pattern in patterns.items():
+            try:
+                compiled_patterns[category] = re.compile(pattern)
+            except re.error:
+                errors.append({
+                    "category": category,
+                    "message": f"El patrón de búsqueda para '{category}' no es válido: revisa paréntesis o caracteres especiales."
+                })
+
         for page_num in range(len(doc)):
             page = doc[page_num]
             text = page.get_text("text")
-            
+
             p_width = page.rect.width
             p_height = page.rect.height
-            
+
             raw_rects = []
-            
-            for category, pattern in patterns.items():
+
+            for category, compiled_pattern in compiled_patterns.items():
                 try:
                     # Encontrar matches y obtener las posiciones reales en el texto
-                    for match in re.finditer(pattern, text):
+                    for match in compiled_pattern.finditer(text):
                         val = match.group().strip()
                         if not val:
                             continue
-                            
+
                         # Avanzamos la búsqueda de contexto usando text.find con offset
                         # Esto garantiza un contexto real si el dato aparece múltiples veces.
                         start_search = 0
-                        
+
                         areas = page.search_for(val)
                         for area in areas:
                             # Buscar el índice del texto a partir de start_search
                             idx = text.find(val, start_search)
                             context = ""
-                            
+
                             if idx != -1:
                                 start = max(0, idx - 30)
                                 end = min(len(text), idx + len(val) + 30)
                                 context = text[start:end].replace('\n', ' ').strip()
                                 start_search = idx + len(val)
-                                
+
                             raw_rects.append({
                                 "id": str(uuid.uuid4()),
                                 "page": page_num,
@@ -64,8 +78,8 @@ try:
                                 "rect": [area.x0, area.y0, area.x1, area.y1]
                             })
                 except Exception:
-                    pass 
-            
+                    pass
+
             # 2. Deduplicación estricta usando el área completa y el texto
             seen_coordinates = set()
             for r in raw_rects:
@@ -73,9 +87,9 @@ try:
                 if coord_hash not in seen_coordinates:
                     seen_coordinates.add(coord_hash)
                     results.append(r)
-                    
+
         with open(results_path, 'w', encoding='utf-8') as f:
-            json.dump({"results": results}, f)
+            json.dump({"results": results, "errors": errors}, f)
 
     elif action == "apply":
         output_path = sys.argv[3]

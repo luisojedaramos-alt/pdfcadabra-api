@@ -115,6 +115,15 @@ const sendExecError = (res, error, fallbackMessage) => {
     return res.status(500).json({ error: fallbackMessage });
 };
 
+// Estado de una petición pesada, para que el frontend avise al usuario mientras
+// espera. El cliente genera un UUID y lo envía en X-Request-Id al hacer el POST;
+// con ese mismo UUID consulta aquí. No pasa por la cola y solo revela el estado.
+//   { state: 'queued', position: 2 } | { state: 'running' } | { state: 'unknown' }
+app.get('/v1/queue/status/:id', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json(heavyLimiter.getStatus(req.params.id));
+});
+
 // ==========================================
 // MÓDULO 1: CENSURA - BÚSQUEDA
 // ==========================================

@@ -120,6 +120,7 @@ const sendExecError = (res, error, fallbackMessage) => {
 // ==========================================
 app.post('/v1/redact/search', upload.single('file'), heavyGate, (req, res) => {
     if (!req.file || !req.body.patterns) {
+        secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
         return res.status(400).json({ error: 'Falta el archivo o los patrones.' });
     }
 
@@ -159,6 +160,7 @@ app.post('/v1/redact/search', upload.single('file'), heavyGate, (req, res) => {
 // ==========================================
 app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
     if (!req.file || !req.body.items) {
+        secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
         return res.status(400).json({ error: 'Falta el archivo o los hallazgos.' });
     }
 

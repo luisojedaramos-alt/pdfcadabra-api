@@ -25,7 +25,11 @@ app.use(cors({
         if (!origin || ALLOWED_ORIGINS.includes(origin)) {
             callback(null, true);
         } else {
-            callback(new Error(`Origen no permitido por CORS: ${origin}`));
+            // callback(null, false) en vez de callback(new Error(...)): así el propio
+            // middleware de cors rechaza la petición (sin cabeceras CORS) sin lanzar una
+            // excepción hacia el error handler por defecto de Express (que exponía el
+            // stack trace y rutas del sistema de archivos en la respuesta).
+            callback(null, false);
         }
     },
     exposedHeaders: ['X-Redact-Warnings']
@@ -288,6 +292,19 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
             secureCleanup([inputPath, outputPath]);
         });
     });
+});
+
+// Manejo de errores no gestionados: debe ir el último y tener 4 argumentos para que
+// Express lo reconozca como error handler. Nunca expone el stack trace ni rutas del
+// sistema de archivos al cliente, ni en desarrollo ni en producción; el detalle solo
+// va al log del servidor.
+app.use((err, req, res, next) => {
+    if (res.headersSent) {
+        return next(err);
+    }
+    console.error('Error no gestionado:', err);
+    const status = err.status || err.statusCode || 500;
+    res.status(status).json({ error: 'Solicitud no permitida' });
 });
 
 // Iniciar servidor

@@ -13,7 +13,21 @@ const port = process.env.PORT || 3000;
 
 // 1. Configuración de middlewares y límites de carga pesada (100 MB para LexNET)
 // AÑADIDO: exposedHeaders para que React pueda leer nuestras alertas de censura
+// Orígenes permitidos: solo el dominio de producción (+ localhost si NODE_ENV no es 'production').
+const PROD_ORIGINS = ['https://pdfcadabra.com', 'https://www.pdfcadabra.com'];
+const DEV_ORIGINS = ['http://localhost:3000', 'http://localhost:5173'];
+const ALLOWED_ORIGINS =
+    process.env.NODE_ENV === 'production' ? PROD_ORIGINS : [...PROD_ORIGINS, ...DEV_ORIGINS];
+
 app.use(cors({
+    origin: (origin, callback) => {
+        // Sin cabecera Origin (curl, health checks, servidor-a-servidor): se permite.
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error(`Origen no permitido por CORS: ${origin}`));
+        }
+    },
     exposedHeaders: ['X-Redact-Warnings']
 }));
 app.use(express.json({ limit: '100mb' }));

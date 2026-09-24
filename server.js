@@ -5,8 +5,10 @@ const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
 const uuidv4 = () => crypto.randomUUID();
 const { createLimiter } = require('./limiter');
+const { startPeriodicSweep } = require('./cleanup');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -37,15 +39,22 @@ app.use(cors({
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// 2. Almacenamiento efímero en memoria (/tmp)
+// 2. Almacenamiento temporal EN DISCO (no en memoria), en una carpeta propia dentro de
+// /tmp: ahí escribe multer la subida y ahí van también los JSON intermedios y el PDF de
+// salida. Tener carpeta propia permite barrerla sin tocar el resto de /tmp.
+const UPLOAD_DIR = path.join(os.tmpdir(), 'pdfcadabra-uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const upload = multer({
-    dest: '/tmp/',
+    dest: UPLOAD_DIR,
     limits: { fileSize: 100 * 1024 * 1024 } // Límite estricto de 100 MB
 });
 
 // ==========================================
-// FUNCIÓN CRÍTICA: LIMPIEZA FORENSE DE DISCO
+// BORRADO DE ARCHIVOS TEMPORALES
 // ==========================================
+// fs.unlink normal: quita el archivo del sistema de ficheros, pero NO sobrescribe su
+// contenido en disco (no es un borrado forense/seguro). Idempotente: se puede llamar
+// varias veces sobre los mismos archivos.
 const secureCleanup = (files) => {
     files.forEach(file => {
         if (file && fs.existsSync(file)) {
@@ -56,6 +65,23 @@ const secureCleanup = (files) => {
             });
         }
     });
+};
+
+// Red de seguridad: borra de UPLOAD_DIR lo que tenga más de 15 minutos, al arrancar y
+// cada 5 minutos (archivos que quedaron si el proceso murió a mitad de una petición).
+// Ninguna petición legítima dura tanto: cola máx. 90 s + proceso máx. 120 s por defecto.
+const SWEEP_MAX_AGE_MS = 15 * 60 * 1000;
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+startPeriodicSweep(UPLOAD_DIR, SWEEP_MAX_AGE_MS, SWEEP_INTERVAL_MS);
+
+// Equivalente a un `finally` de toda la petición: 'close' se emite una sola vez, pase
+// lo que pase (envío completado, error, excepción o cliente desconectado). Un
+// try/finally síncrono no serviría: se ejecutaría antes de que res.sendFile terminase
+// y borraría el archivo mientras se envía. Si el cliente se va con el proceso hijo aún
+// en marcha, el archivo de salida se crea después: lo borra el callback de ese proceso
+// (y, en último caso, el barrido periódico).
+const cleanupOnClose = (res, files) => {
+    res.once('close', () => secureCleanup(files));
 };
 
 // ==========================================
@@ -153,8 +179,8 @@ app.post('/v1/redact/search', upload.single('file'), heavyGate, (req, res) => {
 
     const inputPath = req.file.path;
     const baseId = uuidv4(); // Evita colisiones de archivos temporales entre usuarios
-    const patternsPath = path.join('/tmp', `patterns_${baseId}.json`);
-    const resultsPath = path.join('/tmp', `results_${baseId}.json`);
+    const patternsPath = path.join(UPLOAD_DIR, `patterns_${baseId}.json`);
+    const resultsPath = path.join(UPLOAD_DIR, `results_${baseId}.json`);
 
     try {
         const patternsData = typeof req.body.patterns === 'string' ? req.body.patterns : JSON.stringify(req.body.patterns);
@@ -193,9 +219,10 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
 
     const inputPath = req.file.path;
     const baseId = uuidv4();
-    const itemsPath = path.join('/tmp', `items_${baseId}.json`);
-    const outputPath = path.join('/tmp', `censored_${baseId}.pdf`);
-    const resultsPath = path.join('/tmp', `redact_results_${baseId}.json`); // NUEVO: Archivo de reporte
+    const itemsPath = path.join(UPLOAD_DIR, `items_${baseId}.json`);
+    const outputPath = path.join(UPLOAD_DIR, `censored_${baseId}.pdf`);
+    const resultsPath = path.join(UPLOAD_DIR, `redact_results_${baseId}.json`); // NUEVO: Archivo de reporte
+    cleanupOnClose(res, [inputPath, itemsPath, outputPath, resultsPath]);
 
     try {
         const itemsData = typeof req.body.items === 'string' ? req.body.items : JSON.stringify(req.body.items);
@@ -240,7 +267,8 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
                 res.setHeader('X-Redact-Warnings', encodeURIComponent(JSON.stringify(failed)));
             }
 
-            // Descarga y borrado instantáneo tras confirmar el envío
+            // Envío del resultado y borrado de los temporales al terminar el envío (con
+            // éxito o con error; no hay confirmación de que el navegador lo guardase)
             res.sendFile(outputPath, (err) => {
                 if (err && !res.headersSent) {
                     console.error("Error enviando el documento censurado:", err);
@@ -266,6 +294,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
     const inputPath = req.file.path;
     const level = req.body.level || 'recommended';
     const outputPath = `${inputPath}_compressed.pdf`;
+    cleanupOnClose(res, [inputPath, outputPath]);
 
     // Mapeo de niveles para el motor de compresión
     // extreme: calidad pantalla baja (máximo ahorro)
@@ -287,7 +316,8 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
             return sendExecError(res, error, 'Fallo en el motor de compresión.');
         }
 
-        // Descarga y borrado instantáneo tras confirmar el envío
+        // Envío del resultado y borrado de los temporales al terminar el envío (con
+        // éxito o con error; no hay confirmación de que el navegador lo guardase)
         res.sendFile(outputPath, (err) => {
             secureCleanup([inputPath, outputPath]);
         });

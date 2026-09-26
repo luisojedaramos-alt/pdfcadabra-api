@@ -34,7 +34,7 @@ app.use(cors({
             callback(null, false);
         }
     },
-    exposedHeaders: ['X-Redact-Warnings']
+    exposedHeaders: ['X-Redact-Warnings', 'X-Compress-Status']
 }));
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
@@ -286,6 +286,9 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
 // ==========================================
 // MÓDULO 3: COMPRESIÓN AVANZADA (Ghostscript)
 // ==========================================
+// Ahorro mínimo (2 %) para devolver la salida de Ghostscript en vez del original.
+const MIN_COMPRESS_SAVING = 0.02;
+
 app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No se ha subido ningún archivo.' });
@@ -316,9 +319,26 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
             return sendExecError(res, error, 'Fallo en el motor de compresión.');
         }
 
+        // Ghostscript puede generar un PDF más pesado que el original (p. ej. si ya
+        // estaba optimizado). Si no ahorra al menos MIN_COMPRESS_SAVING, devolvemos el
+        // original tal cual y lo indicamos en X-Compress-Status.
+        let inputSize, outputSize;
+        try {
+            inputSize = fs.statSync(inputPath).size;
+            outputSize = fs.statSync(outputPath).size;
+        } catch (statError) {
+            console.error("Error leyendo el resultado de la compresión:", statError);
+            secureCleanup([inputPath, outputPath]);
+            return res.status(500).json({ error: 'Fallo en el motor de compresión.' });
+        }
+        const compressed = outputSize <= inputSize * (1 - MIN_COMPRESS_SAVING);
+        res.setHeader('X-Compress-Status', compressed ? 'compressed' : 'already-optimized');
+        // El archivo de multer no tiene extensión: sin esto se enviaría como octet-stream.
+        res.type('application/pdf');
+
         // Envío del resultado y borrado de los temporales al terminar el envío (con
         // éxito o con error; no hay confirmación de que el navegador lo guardase)
-        res.sendFile(outputPath, (err) => {
+        res.sendFile(compressed ? outputPath : inputPath, (err) => {
             secureCleanup([inputPath, outputPath]);
         });
     });

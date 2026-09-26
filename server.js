@@ -69,7 +69,8 @@ const secureCleanup = (files) => {
 
 // Red de seguridad: borra de UPLOAD_DIR lo que tenga más de 15 minutos, al arrancar y
 // cada 5 minutos (archivos que quedaron si el proceso murió a mitad de una petición).
-// Ninguna petición legítima dura tanto: cola máx. 90 s + proceso máx. 120 s por defecto.
+// Ninguna petición legítima dura tanto: cola máx. 90 s + máx. 180 s por proceso (por
+// defecto), y la ruta más larga (compresión) encadena dos procesos: 7,5 min en total.
 const SWEEP_MAX_AGE_MS = 15 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 startPeriodicSweep(UPLOAD_DIR, SWEEP_MAX_AGE_MS, SWEEP_INTERVAL_MS);
@@ -94,7 +95,9 @@ const envInt = (name, fallback) => {
     const n = parseInt(process.env[name], 10);
     return Number.isInteger(n) && n >= 0 ? n : fallback;
 };
-const HEAVY_EXEC_TIMEOUT_MS = envInt('HEAVY_EXEC_TIMEOUT_MS', 120000);
+// 180 s: un PDF de 20 MB (máximo del plan gratuito) en nivel extremo tarda unos 110 s
+// en Ghostscript en Render (~6,7 veces más lento que un equipo de sobremesa).
+const HEAVY_EXEC_TIMEOUT_MS = envInt('HEAVY_EXEC_TIMEOUT_MS', 180000);
 const RETRY_AFTER_SECONDS = 10;
 const heavyLimiter = createLimiter({
     maxConcurrent: Math.max(1, envInt('HEAVY_MAX_CONCURRENT', 1)),

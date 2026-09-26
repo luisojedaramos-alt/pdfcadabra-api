@@ -9,15 +9,15 @@
 
 # Pendientes
 
-- **PRIORITARIO: migrar la imagen a una versión de Node con soporte sobre
-  Debian trixie.** `FROM node:20-bookworm-slim` usa una versión que llegó a fin
-  de vida el 2026-04-30 (última release: 20.20.2, 2026-03-24), así que ya no
-  recibe parches de seguridad. Fuentes: calendario oficial `nodejs/Release`
-  (schedule.json) y endoflife.date. Candidatos: `node:22-trixie-slim` (EOL
-  2027-04-30) o `node:24-trixie-slim` (EOL 2028-04-30). Trixie además trae el
-  paquete `jbig2` (jbig2enc), que bookworm no tiene, por si se añade compresión
-  JBIG2 sin pérdida (nunca con pérdida: sin `-s`). Antes de cambiarlo, comprobar
-  multer 2.x, PyMuPDF (pip en el venv), Ghostscript y poppler-utils de trixie
-  con la nueva versión, y repetir las mediciones de /v1/compress (las
-  resoluciones de Ghostscript pueden variar entre versiones). Commit propio, no
-  mezclar con otros cambios.
+- **EN CURSO (rama `chore/node-trixie`, sin fusionar): migración de la imagen
+  a `node:24-trixie-slim`.** Sustituye a `node:20-bookworm-slim` (Node 20 llegó
+  a fin de vida el 2026-04-30). Node 24 tiene soporte hasta el 2028-04-30; se
+  descartó Node 22 porque acaba el 2027-04-30 (fuente: `nodejs/Release`,
+  schedule.json). Cambios de trixie frente a bookworm: Ghostscript 10.0.0 →
+  10.05.1, Python 3.11 → 3.13 (PyMuPDF 1.28.2 se instala desde la rueda abi3 en
+  el venv), poppler-utils 22.12 → 25.03 (el código no lo usa). multer, p-limit,
+  cors y express no ponen restricciones de versión de Node que afecten. Pendiente
+  antes de fusionar: validar la rama en un servicio temporal de Render con
+  `scripts/test-migracion/run.sh`, comparando tamaños y tiempos de /v1/compress
+  frente a producción. Trixie trae además el paquete `jbig2` (jbig2enc); no se
+  ha añadido todavía (si se añade, solo sin pérdida: nunca con `-s`).

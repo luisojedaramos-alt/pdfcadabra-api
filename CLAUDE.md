@@ -20,6 +20,14 @@
   por archivo, de metadatos), mismos tiempos y mismo resultado en Anonimizar.
   El script sirve para repetir la comparación en futuras migraciones.
 
+# Errores de subida
+
+- El error handler de `server.js` traduce `multer.MulterError` a JSON:
+  `LIMIT_FILE_SIZE` → 413 `FILE_TOO_LARGE`; cualquier otro código → 400
+  `UPLOAD_ERROR` con mensaje genérico. Las cabeceras CORS llegan porque `cors`
+  corre antes que las rutas, y multer borra el parcial de `pdfcadabra-uploads`
+  él mismo antes de llamar al handler (verificado en local con 101 MB).
+
 # Pendientes
 
 - Trixie trae el paquete `jbig2` (jbig2enc), que bookworm no tenía, por si se

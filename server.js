@@ -400,6 +400,16 @@ app.use((err, req, res, next) => {
     if (res.headersSent) {
         return next(err);
     }
+    // Errores de la subida (multer). Las cabeceras CORS ya están puestas: el
+    // middleware de cors corre antes que las rutas. multer borra por su cuenta lo
+    // que llegase a escribir en UPLOAD_DIR antes de pasar el error.
+    if (err instanceof multer.MulterError) {
+        console.warn(`Subida rechazada (${err.code}${err.field ? `, campo "${err.field}"` : ''})`);
+        if (err.code === 'LIMIT_FILE_SIZE') {
+            return res.status(413).json({ error: 'FILE_TOO_LARGE', message: 'El archivo supera el máximo de 100 MB.' });
+        }
+        return res.status(400).json({ error: 'UPLOAD_ERROR', message: 'No se ha podido procesar el archivo subido.' });
+    }
     console.error('Error no gestionado:', err);
     const status = err.status || err.statusCode || 500;
     res.status(status).json({ error: 'Solicitud no permitida' });

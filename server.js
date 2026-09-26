@@ -142,9 +142,11 @@ const heavyGate = async (req, res, next) => {
 };
 
 // Lanza el proceso hijo con timeout y libera el hueco al terminar (éxito, error o timeout).
-const runHeavy = (req, command, args, callback) => {
+// keepSlot: si el proceso termina bien, el hueco sigue ocupado para el siguiente paso de
+// la misma petición, que es quien lo libera (release es idempotente).
+const runHeavy = (req, command, args, callback, { keepSlot = false } = {}) => {
     const child = execFile(command, args, { timeout: HEAVY_EXEC_TIMEOUT_MS, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
-        if (req.releaseSlot) req.releaseSlot();
+        if ((!keepSlot || error) && req.releaseSlot) req.releaseSlot();
         callback(error, stdout, stderr);
     });
     req.execStarted = true; // tras execFile: si este lanzase una excepción, el 'close' aún libera el hueco
@@ -289,6 +291,25 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
 // Ahorro mínimo (2 %) para devolver la salida de Ghostscript en vez del original.
 const MIN_COMPRESS_SAVING = 0.02;
 
+// Niveles de compresión: preset de Ghostscript + resolución objetivo (ppp) de las
+// imágenes en color/gris y de las de blanco y negro (null = no se reducen).
+// El color/gris usa umbral 1.5: solo se reduce lo que supere 1,5 × el objetivo
+// (~225 ppp en recomendada, ~165 en extrema). Así los fondos JPEG de 150 ppp de los
+// escaneos no se recodifican (es lo que más tiempo cuesta y apenas ahorra), pero las
+// fotos de alta resolución (informes periciales, fotos de daños) sí se reducen.
+// extreme: máximo ahorro · recommended: balance ideal LexNET · low: sin reducir nada
+const COMPRESS_LEVELS = {
+    extreme: { pdfSettings: '/screen', colorDpi: 110, monoDpi: 150 },
+    recommended: { pdfSettings: '/ebook', colorDpi: 150, monoDpi: 200 },
+    low: { pdfSettings: '/printer', colorDpi: null, monoDpi: null }
+};
+
+// Parámetros de reducción de un tipo de imagen ('Color', 'Gray' o 'Mono') para Ghostscript.
+const downsampleArgs = (kind, dpi, threshold) =>
+    dpi === null
+        ? [`-dDownsample${kind}Images=false`]
+        : [`-dDownsample${kind}Images=true`, `-d${kind}ImageResolution=${dpi}`, `-d${kind}ImageDownsampleThreshold=${threshold}`];
+
 app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No se ha subido ningún archivo.' });
@@ -296,31 +317,55 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
 
     const inputPath = req.file.path;
     const level = req.body.level || 'recommended';
-    const outputPath = `${inputPath}_compressed.pdf`;
-    cleanupOnClose(res, [inputPath, outputPath]);
+    const gsOutputPath = `${inputPath}_gs.pdf`; // intermedio: salida de Ghostscript
+    const outputPath = `${inputPath}_compressed.pdf`; // salida final, tras jpeg_flate.py
+    const tempFiles = [inputPath, gsOutputPath, outputPath];
+    cleanupOnClose(res, tempFiles);
 
-    // Mapeo de niveles para el motor de compresión
-    // extreme: calidad pantalla baja (máximo ahorro)
-    // recommended: calidad ebook (balance ideal LexNET)
-    // low: calidad impresión (retiene detalle fotográfico)
-    let pdfSettings = '/ebook';
-    if (level === 'extreme') pdfSettings = '/screen';
-    if (level === 'low') pdfSettings = '/printer';
+    // hasOwn: `level` viene del cliente; evita claves heredadas como "constructor".
+    const { pdfSettings, colorDpi, monoDpi } =
+        Object.hasOwn(COMPRESS_LEVELS, level) ? COMPRESS_LEVELS[level] : COMPRESS_LEVELS.recommended;
 
     const args = [
         '-sDEVICE=pdfwrite', '-dCompatibilityLevel=1.4', `-dPDFSETTINGS=${pdfSettings}`,
-        '-dNOPAUSE', '-dQUIET', '-dBATCH', `-sOutputFile=${outputPath}`, inputPath
+        // Resoluciones explícitas: los presets nunca reducen las imágenes en blanco y
+        // negro (CCITT), que en los escaneos de juzgado suponen la mayor parte del peso.
+        ...downsampleArgs('Color', colorDpi, 1.5),
+        ...downsampleArgs('Gray', colorDpi, 1.5),
+        // B/N: umbral 1.0 (el mínimo), porque con el 1.5 por defecto 300 ppp no llega a
+        // bajar a 200. /Subsample es el único método que Ghostscript admite para B/N.
+        ...downsampleArgs('Mono', monoDpi, 1.0), '-dMonoImageDownsampleType=/Subsample',
+        '-dNOPAUSE', '-dQUIET', '-dBATCH', `-sOutputFile=${gsOutputPath}`, inputPath
     ];
 
     runHeavy(req, 'gs', args, (error, stdout, stderr) => {
         if (error) {
             console.error("Error en compresión:", stderr);
-            secureCleanup([inputPath, outputPath]);
+            secureCleanup(tempFiles);
             return sendExecError(res, error, 'Fallo en el motor de compresión.');
         }
 
-        // Ghostscript puede generar un PDF más pesado que el original (p. ej. si ya
-        // estaba optimizado). Si no ahorra al menos MIN_COMPRESS_SAVING, devolvemos el
+        // Ghostscript quita la capa Flate a los JPEG que la llevaban: jpeg_flate.py la
+        // restaura (sin pérdida) cuando reduce su tamaño. Usa el mismo hueco de la cola.
+        try {
+            runHeavy(req, 'python3', ['jpeg_flate.py', gsOutputPath, outputPath], sendCompressed);
+        } catch (e) {
+            if (req.releaseSlot) req.releaseSlot();
+            console.error("Error lanzando el paso posterior de la compresión:", e);
+            secureCleanup(tempFiles);
+            res.status(500).json({ error: 'Fallo en el motor de compresión.' });
+        }
+    }, { keepSlot: true });
+
+    function sendCompressed(error, stdout, stderr) {
+        if (error) {
+            console.error("Error en el paso posterior de la compresión:", stderr);
+            secureCleanup(tempFiles);
+            return sendExecError(res, error, 'Fallo en el motor de compresión.');
+        }
+
+        // El resultado puede pesar más que el original (p. ej. si ya estaba optimizado).
+        // Si el tamaño final no ahorra al menos MIN_COMPRESS_SAVING, devolvemos el
         // original tal cual y lo indicamos en X-Compress-Status.
         let inputSize, outputSize;
         try {
@@ -328,7 +373,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
             outputSize = fs.statSync(outputPath).size;
         } catch (statError) {
             console.error("Error leyendo el resultado de la compresión:", statError);
-            secureCleanup([inputPath, outputPath]);
+            secureCleanup(tempFiles);
             return res.status(500).json({ error: 'Fallo en el motor de compresión.' });
         }
         const compressed = outputSize <= inputSize * (1 - MIN_COMPRESS_SAVING);
@@ -339,9 +384,9 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
         // Envío del resultado y borrado de los temporales al terminar el envío (con
         // éxito o con error; no hay confirmación de que el navegador lo guardase)
         res.sendFile(compressed ? outputPath : inputPath, (err) => {
-            secureCleanup([inputPath, outputPath]);
+            secureCleanup(tempFiles);
         });
-    });
+    }
 });
 
 // Manejo de errores no gestionados: debe ir el último y tener 4 argumentos para que

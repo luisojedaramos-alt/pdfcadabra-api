@@ -36,6 +36,14 @@ app.use(cors({
     },
     exposedHeaders: ['X-Redact-Warnings', 'X-Compress-Status']
 }));
+
+// Health check de Render: responde al instante, antes de los parsers de body y de
+// multer, sin pasar por la cola pesada ni lanzar procesos hijos.
+app.get('/health', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ status: 'ok' });
+});
+
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
@@ -415,7 +423,11 @@ app.use((err, req, res, next) => {
     res.status(status).json({ error: 'Solicitud no permitida' });
 });
 
-// Iniciar servidor
-app.listen(port, () => {
-    console.log(`Servidor PDFcadabra LegalTech activo en puerto ${port}`);
-});
+// Iniciar servidor (solo al ejecutarlo con `node server.js`; los tests importan `app`)
+if (require.main === module) {
+    app.listen(port, () => {
+        console.log(`Servidor PDFcadabra LegalTech activo en puerto ${port}`);
+    });
+}
+
+module.exports = app;

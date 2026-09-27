@@ -103,9 +103,14 @@ const envInt = (name, fallback) => {
     const n = parseInt(process.env[name], 10);
     return Number.isInteger(n) && n >= 0 ? n : fallback;
 };
-// 180 s: un PDF de 20 MB (máximo del plan gratuito) en nivel extremo tarda unos 110 s
-// en Ghostscript en Render (~6,7 veces más lento que un equipo de sobremesa).
+// Tope por proceso de Anonimizar (redact.py search/apply). Comprimir usa su propio tope
+// total, COMPRESS_TOTAL_TIMEOUT_MS.
 const HEAVY_EXEC_TIMEOUT_MS = envInt('HEAVY_EXEC_TIMEOUT_MS', 180000);
+// Tope TOTAL de /v1/compress, Ghostscript y jpeg_flate.py juntos. Peor caso medido en la
+// instancia 0.5c-512mb (escaneo sintético de 20 MB y 23 páginas, nivel extremo): 14,4 s de
+// gs + 0,4 s de jpeg_flate.py. 90 s dejan margen para escaneos reales con muchas más
+// páginas: gs escala con páginas y píxeles, no con MB.
+const COMPRESS_TOTAL_TIMEOUT_MS = envInt('COMPRESS_TOTAL_TIMEOUT_MS', 90000);
 const RETRY_AFTER_SECONDS = 10;
 const heavyLimiter = createLimiter({
     maxConcurrent: Math.max(1, envInt('HEAVY_MAX_CONCURRENT', 1)),
@@ -155,8 +160,8 @@ const heavyGate = async (req, res, next) => {
 // Lanza el proceso hijo con timeout y libera el hueco al terminar (éxito, error o timeout).
 // keepSlot: si el proceso termina bien, el hueco sigue ocupado para el siguiente paso de
 // la misma petición, que es quien lo libera (release es idempotente).
-const runHeavy = (req, command, args, callback, { keepSlot = false } = {}) => {
-    const child = execFile(command, args, { timeout: HEAVY_EXEC_TIMEOUT_MS, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
+const runHeavy = (req, command, args, callback, { keepSlot = false, timeoutMs = HEAVY_EXEC_TIMEOUT_MS } = {}) => {
+    const child = execFile(command, args, { timeout: timeoutMs, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
         if ((!keepSlot || error) && req.releaseSlot) req.releaseSlot();
         callback(error, stdout, stderr);
     });
@@ -164,9 +169,12 @@ const runHeavy = (req, command, args, callback, { keepSlot = false } = {}) => {
     return child;
 };
 
-// 504 si el proceso superó HEAVY_EXEC_TIMEOUT_MS; si no, el 500 propio de cada ruta.
+// Proceso matado por su timeout (runHeavy lo lanza con killSignal SIGKILL).
+const isExecTimeout = (error) => error.killed && error.signal === 'SIGKILL';
+
+// 504 si el proceso superó su tope de tiempo; si no, el 500 propio de cada ruta.
 const sendExecError = (res, error, fallbackMessage) => {
-    if (error.killed && error.signal === 'SIGKILL') {
+    if (isExecTimeout(error)) {
         return res.status(504).json({ code: 'PROCESSING_TIMEOUT', error: 'El documento ha tardado demasiado en procesarse.' });
     }
     return res.status(500).json({ error: fallbackMessage });
@@ -349,6 +357,9 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
         '-dNOPAUSE', '-dQUIET', '-dBATCH', `-sOutputFile=${gsOutputPath}`, inputPath
     ];
 
+    // gs y jpeg_flate.py comparten un único tope: jpeg_flate.py solo tiene lo que sobre.
+    const deadline = Date.now() + COMPRESS_TOTAL_TIMEOUT_MS;
+
     runHeavy(req, 'gs', args, (error, stdout, stderr) => {
         if (error) {
             console.error("Error en compresión:", stderr);
@@ -356,32 +367,48 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
             return sendExecError(res, error, 'Fallo en el motor de compresión.');
         }
 
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+            if (req.releaseSlot) req.releaseSlot();
+            console.warn('Tope de compresión agotado tras Ghostscript; se envía su salida sin jpeg_flate.py.');
+            return sendResult(gsOutputPath);
+        }
+
         // Ghostscript quita la capa Flate a los JPEG que la llevaban: jpeg_flate.py la
         // restaura (sin pérdida) cuando reduce su tamaño. Usa el mismo hueco de la cola.
         try {
-            runHeavy(req, 'python3', ['jpeg_flate.py', gsOutputPath, outputPath], sendCompressed);
+            runHeavy(req, 'python3', ['jpeg_flate.py', gsOutputPath, outputPath], sendCompressed, { timeoutMs: remainingMs });
         } catch (e) {
             if (req.releaseSlot) req.releaseSlot();
             console.error("Error lanzando el paso posterior de la compresión:", e);
             secureCleanup(tempFiles);
             res.status(500).json({ error: 'Fallo en el motor de compresión.' });
         }
-    }, { keepSlot: true });
+    }, { keepSlot: true, timeoutMs: COMPRESS_TOTAL_TIMEOUT_MS });
 
     function sendCompressed(error, stdout, stderr) {
+        // Tope agotado en jpeg_flate.py: la salida de gs ya es un PDF válido, solo le falta
+        // restaurar la capa Flate de algunos JPEG. Mejor eso que un error.
+        if (error && isExecTimeout(error)) {
+            console.warn('Tope de compresión agotado en jpeg_flate.py; se envía la salida de Ghostscript.');
+            return sendResult(gsOutputPath);
+        }
         if (error) {
             console.error("Error en el paso posterior de la compresión:", stderr);
             secureCleanup(tempFiles);
             return sendExecError(res, error, 'Fallo en el motor de compresión.');
         }
+        sendResult(outputPath);
+    }
 
+    function sendResult(resultPath) {
         // El resultado puede pesar más que el original (p. ej. si ya estaba optimizado).
         // Si el tamaño final no ahorra al menos MIN_COMPRESS_SAVING, devolvemos el
         // original tal cual y lo indicamos en X-Compress-Status.
         let inputSize, outputSize;
         try {
             inputSize = fs.statSync(inputPath).size;
-            outputSize = fs.statSync(outputPath).size;
+            outputSize = fs.statSync(resultPath).size;
         } catch (statError) {
             console.error("Error leyendo el resultado de la compresión:", statError);
             secureCleanup(tempFiles);
@@ -394,7 +421,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
 
         // Envío del resultado y borrado de los temporales al terminar el envío (con
         // éxito o con error; no hay confirmación de que el navegador lo guardase)
-        res.sendFile(compressed ? outputPath : inputPath, (err) => {
+        res.sendFile(compressed ? resultPath : inputPath, (err) => {
             secureCleanup(tempFiles);
         });
     }

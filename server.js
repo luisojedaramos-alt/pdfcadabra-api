@@ -349,9 +349,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
         '-dNOPAUSE', '-dQUIET', '-dBATCH', `-sOutputFile=${gsOutputPath}`, inputPath
     ];
 
-    const tGs0 = Date.now(); let tGs = 0, tPy0 = 0; // TEMPORAL: medir duraciones
     runHeavy(req, 'gs', args, (error, stdout, stderr) => {
-        tGs = Date.now() - tGs0; tPy0 = Date.now(); // TEMPORAL
         if (error) {
             console.error("Error en compresión:", stderr);
             secureCleanup(tempFiles);
@@ -371,9 +369,6 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
     }, { keepSlot: true });
 
     function sendCompressed(error, stdout, stderr) {
-        const tPy = Date.now() - tPy0; // TEMPORAL
-        console.log(`[timing] compress level=${level} gs=${tGs}ms jpeg_flate=${tPy}ms`); // TEMPORAL
-        res.setHeader('Server-Timing', `gs;dur=${tGs}, jpeg_flate;dur=${tPy}`); // TEMPORAL
         if (error) {
             console.error("Error en el paso posterior de la compresión:", stderr);
             secureCleanup(tempFiles);

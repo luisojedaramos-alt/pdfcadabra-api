@@ -20,6 +20,16 @@
   por archivo, de metadatos), mismos tiempos y mismo resultado en Anonimizar.
   El script sirve para repetir la comparación en futuras migraciones.
 
+# Health check
+
+- `GET /health` responde 200 `{"status":"ok"}` con `Cache-Control: no-store`.
+  Es para el health check de Render (Settings → Health Check Path): va justo
+  después de `cors` y antes de los parsers de body, multer y la cola HEAVY_*,
+  así que no lanza gs/python ni espera en cola aunque haya trabajos pesados en
+  curso. Solo dice que el proceso de Node está vivo; no comprueba que gs o
+  python3 funcionen. Test en `server.test.js` (por eso `server.js` exporta
+  `app` y solo llama a `listen` si se ejecuta directamente).
+
 # Errores de subida
 
 - El error handler de `server.js` traduce `multer.MulterError` a JSON:

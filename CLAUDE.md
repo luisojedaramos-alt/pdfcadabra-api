@@ -20,6 +20,11 @@
   por archivo, de metadatos), mismos tiempos y mismo resultado en Anonimizar.
   El script sirve para repetir la comparación en futuras migraciones.
 
+# Instancia
+
+- Render `0.5c-512mb`: 0,5 CPU y 512 MB de RAM, siempre encendida (no se
+  duerme como la Free). Health Check Path: `/health`.
+
 # Health check
 
 - `GET /health` responde 200 `{"status":"ok"}` con `Cache-Control: no-store`.

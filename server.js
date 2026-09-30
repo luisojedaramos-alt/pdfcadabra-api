@@ -9,6 +9,7 @@ const os = require('os');
 const uuidv4 = () => crypto.randomUUID();
 const { createLimiter } = require('./limiter');
 const { startPeriodicSweep } = require('./cleanup');
+const { describeError } = require('./errlog');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -68,12 +69,16 @@ const secureCleanup = (files) => {
         if (file && fs.existsSync(file)) {
             fs.unlink(file, (err) => {
                 if (err && err.code !== 'ENOENT') {
-                    console.error(`Error borrando rastro físico (${file}):`, err);
+                    console.error(`Error borrando rastro físico (${file}):`, describeError(err));
                 }
             });
         }
     });
 };
+
+// Censuras que no se pudieron aplicar ({id, error} de redact.py): al log solo van los
+// mensajes de error, sin el objeto.
+const failedMessages = (failed) => failed.map((f) => String(f && f.error)).join(' | ');
 
 // Borra una carpeta temporal con todo su contenido (la de Ghostscript de cada petición).
 // Idempotente, como secureCleanup. Los borrados de una misma carpeta van en serie: se
@@ -83,7 +88,7 @@ const tempDirRemovals = new Map();
 const removeTempDir = (dir) => {
     const next = (tempDirRemovals.get(dir) || Promise.resolve())
         .then(() => fs.promises.rm(dir, { recursive: true, force: true }))
-        .catch((err) => console.error(`Error borrando carpeta temporal (${dir}):`, err))
+        .catch((err) => console.error(`Error borrando carpeta temporal (${dir}):`, describeError(err)))
         .finally(() => {
             if (tempDirRemovals.get(dir) === next) tempDirRemovals.delete(dir);
         });
@@ -166,7 +171,7 @@ const heavyGate = async (req, res, next) => {
             res.set('Retry-After', String(RETRY_AFTER_SECONDS));
             return res.status(503).json({ code: err.code, error: QUEUE_ERRORS[err.code] });
         }
-        console.error('Error inesperado en la cola de procesamiento:', err);
+        console.error('Error inesperado en la cola de procesamiento:', describeError(err));
         return res.status(500).json({ error: 'Error del servidor en la cola de procesamiento.' });
     }
     next();
@@ -281,7 +286,7 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
                     report = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
                 }
             } catch (e) {
-                console.error("No se pudo leer el reporte de fallos parciales:", e);
+                console.error("No se pudo leer el reporte de fallos parciales:", describeError(e));
             }
 
             const failed = (report && report.failed) || [];
@@ -291,7 +296,7 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
             // CRÍTICO: si se pidieron censuras y NINGUNA se aplicó, el PDF de salida
             // es idéntico al original sin censurar. Nunca lo enviamos como si fuera un éxito.
             if (totalRequested > 0 && applied === 0) {
-                console.error(`[Redact] Fallaron todas las censuras (${failed.length}/${totalRequested}):`, failed);
+                console.error(`[Redact] Fallaron todas las censuras (${failed.length}/${totalRequested}):`, failedMessages(failed));
                 secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
                 return res.status(422).json({
                     error: 'No se pudo aplicar ninguna censura. El documento no se ha modificado y no ha sido enviado.',
@@ -301,7 +306,7 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
 
             // Si hay fallos parciales, los inyectamos en las cabeceras HTTP
             if (failed.length > 0) {
-                console.warn(`[Redact] ${failed.length} censuras no se pudieron aplicar:`, failed);
+                console.warn(`[Redact] ${failed.length} censuras no se pudieron aplicar:`, failedMessages(failed));
                 res.setHeader('X-Redact-Warnings', encodeURIComponent(JSON.stringify(failed)));
             }
 
@@ -309,7 +314,7 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
             // éxito o con error; no hay confirmación de que el navegador lo guardase)
             res.sendFile(outputPath, (err) => {
                 if (err && !res.headersSent) {
-                    console.error("Error enviando el documento censurado:", err);
+                    console.error("Error enviando el documento censurado:", describeError(err));
                     res.status(500).json({ error: 'Error enviando el documento censurado.' });
                 }
                 secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
@@ -368,7 +373,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
     try {
         fs.mkdirSync(gsTmpDir);
     } catch (e) {
-        console.error('Error creando la carpeta temporal de Ghostscript:', e);
+        console.error('Error creando la carpeta temporal de Ghostscript:', describeError(e));
         cleanupAll();
         return res.status(500).json({ error: 'Fallo en el motor de compresión.' });
     }
@@ -413,7 +418,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
             runHeavy(req, 'python3', ['jpeg_flate.py', gsOutputPath, outputPath], sendCompressed, { timeoutMs: remainingMs });
         } catch (e) {
             if (req.releaseSlot) req.releaseSlot();
-            console.error("Error lanzando el paso posterior de la compresión:", e);
+            console.error("Error lanzando el paso posterior de la compresión:", describeError(e));
             cleanupAll();
             res.status(500).json({ error: 'Fallo en el motor de compresión.' });
         }
@@ -443,7 +448,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
             inputSize = fs.statSync(inputPath).size;
             outputSize = fs.statSync(resultPath).size;
         } catch (statError) {
-            console.error("Error leyendo el resultado de la compresión:", statError);
+            console.error("Error leyendo el resultado de la compresión:", describeError(statError));
             cleanupAll();
             return res.status(500).json({ error: 'Fallo en el motor de compresión.' });
         }
@@ -478,7 +483,7 @@ app.use((err, req, res, next) => {
         }
         return res.status(400).json({ error: 'UPLOAD_ERROR', message: 'No se ha podido procesar el archivo subido.' });
     }
-    console.error('Error no gestionado:', err);
+    console.error('Error no gestionado:', describeError(err));
     const status = err.status || err.statusCode || 500;
     res.status(status).json({ error: 'Solicitud no permitida' });
 });

@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { describeError } = require('./errlog');
 
 // Borra de `dir` los archivos y subcarpetas (con todo su contenido, p. ej. la carpeta
 // temporal de Ghostscript de una petición) cuya última modificación tiene más de
@@ -26,7 +27,7 @@ const sweepOldFiles = async (dir, maxAgeMs, now = Date.now()) => {
             removed++;
         } catch (err) {
             // ENOENT: lo borró entretanto la propia petición.
-            if (err.code !== 'ENOENT') console.error(`Error en la limpieza periódica (${file}):`, err);
+            if (err.code !== 'ENOENT') console.error(`Error en la limpieza periódica (${file}):`, describeError(err));
         }
     }
     return removed;
@@ -39,7 +40,7 @@ const startPeriodicSweep = (dir, maxAgeMs, intervalMs) => {
         .then((removed) => {
             if (removed > 0) console.warn(`[Limpieza] ${removed} temporal(es) (archivos o carpetas) con más de ${maxAgeMs / 60000} min borrados.`);
         })
-        .catch((err) => console.error('Error en la limpieza periódica:', err));
+        .catch((err) => console.error('Error en la limpieza periódica:', describeError(err)));
     run();
     return setInterval(run, intervalMs).unref();
 };

@@ -14,4 +14,22 @@ const describeError = (err) => {
     return message ? `[${code}] ${message}` : `[${code}]`;
 };
 
-module.exports = { describeError };
+const STDERR_MAX_CHARS = 200;
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Fallo de un proceso hijo (gs, redact.py, jpeg_flate.py) para el log: código de salida
+// (o señal, si lo mataron) y solo los primeros 200 caracteres de stderr, con las rutas de
+// la carpeta de subidas cambiadas por "<tmp>". Se sustituye antes de recortar, para que
+// un corte a mitad de ruta no deje un trozo.
+const describeProcessError = (error, stderr, uploadDirs) => {
+    const code = error && (error.code ?? error.signal);
+    let text = String(stderr || '');
+    for (const dir of uploadDirs) {
+        text = text.replace(new RegExp(`${escapeRegExp(dir)}[^\\s'"]*`, 'g'), '<tmp>');
+    }
+    text = text.replace(/\s+/g, ' ').trim();
+    if (text.length > STDERR_MAX_CHARS) text = `${text.slice(0, STDERR_MAX_CHARS)}…`;
+    return `código ${code ?? 'desconocido'}${text ? `: ${text}` : ''}`;
+};
+
+module.exports = { describeError, describeProcessError };

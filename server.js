@@ -9,7 +9,7 @@ const os = require('os');
 const uuidv4 = () => crypto.randomUUID();
 const { createLimiter } = require('./limiter');
 const { startPeriodicSweep } = require('./cleanup');
-const { describeError } = require('./errlog');
+const { describeError, describeProcessError } = require('./errlog');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -75,6 +75,13 @@ const secureCleanup = (files) => {
         }
     });
 };
+
+// Fallo de un proceso hijo: código de salida y el principio de su stderr, sin rutas de
+// la carpeta de subidas (ver describeProcessError). '/tmp/pdfcadabra-uploads' va aparte
+// por si os.tmpdir() no es /tmp.
+const UPLOAD_DIRS = [...new Set([UPLOAD_DIR, '/tmp/pdfcadabra-uploads'])];
+const logProcessError = (label, error, stderr) =>
+    console.error(label, describeProcessError(error, stderr, UPLOAD_DIRS));
 
 // Censuras que no se pudieron aplicar ({id, error} de redact.py): al log solo van los
 // mensajes de error, sin el objeto.
@@ -231,7 +238,7 @@ app.post('/v1/redact/search', upload.single('file'), heavyGate, (req, res) => {
 
         runHeavy(req, 'python3', ['redact.py', 'search', inputPath, patternsPath, resultsPath], (error, stdout, stderr) => {
             if (error) {
-                console.error("Error en búsqueda:", stderr);
+                logProcessError("Error en búsqueda:", error, stderr);
                 secureCleanup([inputPath, patternsPath, resultsPath]);
                 return sendExecError(res, error, 'Error analizando el documento.');
             }
@@ -274,7 +281,7 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
         // NUEVO: Se añade el quinto argumento (resultsPath) al comando Python
         runHeavy(req, 'python3', ['redact.py', 'apply', inputPath, outputPath, itemsPath, resultsPath], (error, stdout, stderr) => {
             if (error) {
-                console.error("Error en censura:", stderr);
+                logProcessError("Error en censura:", error, stderr);
                 secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
                 return sendExecError(res, error, 'Error aplicando la censura forense.');
             }
@@ -400,7 +407,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
 
     runHeavy(req, 'gs', args, (error, stdout, stderr) => {
         if (error) {
-            console.error("Error en compresión:", stderr);
+            logProcessError("Error en compresión:", error, stderr);
             cleanupAll();
             return sendExecError(res, error, 'Fallo en el motor de compresión.');
         }
@@ -432,7 +439,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
             return sendResult(gsOutputPath);
         }
         if (error) {
-            console.error("Error en el paso posterior de la compresión:", stderr);
+            logProcessError("Error en el paso posterior de la compresión:", error, stderr);
             cleanupAll();
             return sendExecError(res, error, 'Fallo en el motor de compresión.');
         }

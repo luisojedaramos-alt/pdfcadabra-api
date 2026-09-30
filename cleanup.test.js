@@ -30,16 +30,22 @@ test('borra solo los archivos con más de la antigüedad máxima', async () => {
     fs.rmSync(dir, { recursive: true });
 });
 
-test('no toca subcarpetas', async () => {
+test('borra las subcarpetas antiguas con su contenido y deja las recientes', async () => {
     const dir = makeDir();
     const now = Date.now();
-    const sub = path.join(dir, 'sub');
-    fs.mkdirSync(sub);
-    const t = new Date(now - 60 * MIN);
-    fs.utimesSync(sub, t, t);
+    const age = (p, ms) => { const t = new Date(now - ms); fs.utimesSync(p, t, t); };
+    const old = path.join(dir, 'gs-old');
+    const fresh = path.join(dir, 'gs-fresh');
+    for (const sub of [old, fresh]) {
+        fs.mkdirSync(sub);
+        fs.writeFileSync(path.join(sub, 'gs_abc123'), 'x'); // temporal de Ghostscript
+    }
+    age(old, 60 * MIN);
+    age(fresh, 5 * MIN);
 
-    assert.equal(await sweepOldFiles(dir, 15 * MIN, now), 0);
-    assert.equal(fs.existsSync(sub), true);
+    assert.equal(await sweepOldFiles(dir, 15 * MIN, now), 1);
+    assert.equal(fs.existsSync(old), false);
+    assert.equal(fs.existsSync(path.join(fresh, 'gs_abc123')), true);
     fs.rmSync(dir, { recursive: true });
 });
 

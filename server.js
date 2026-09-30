@@ -75,6 +75,21 @@ const secureCleanup = (files) => {
     });
 };
 
+// Borra una carpeta temporal con todo su contenido (la de Ghostscript de cada petición).
+// Idempotente, como secureCleanup. Los borrados de una misma carpeta van en serie: se
+// llama al cerrar la conexión y otra vez al acabar el envío o el proceso, y dos rm
+// recursivos a la vez sobre la misma carpeta chocan (EPERM en Windows).
+const tempDirRemovals = new Map();
+const removeTempDir = (dir) => {
+    const next = (tempDirRemovals.get(dir) || Promise.resolve())
+        .then(() => fs.promises.rm(dir, { recursive: true, force: true }))
+        .catch((err) => console.error(`Error borrando carpeta temporal (${dir}):`, err))
+        .finally(() => {
+            if (tempDirRemovals.get(dir) === next) tempDirRemovals.delete(dir);
+        });
+    tempDirRemovals.set(dir, next);
+};
+
 // Red de seguridad: borra de UPLOAD_DIR lo que tenga más de 15 minutos, al arrancar y
 // cada 5 minutos (archivos que quedaron si el proceso murió a mitad de una petición).
 // Ninguna petición legítima dura tanto: cola máx. 90 s + máx. 180 s por proceso (por
@@ -160,8 +175,10 @@ const heavyGate = async (req, res, next) => {
 // Lanza el proceso hijo con timeout y libera el hueco al terminar (éxito, error o timeout).
 // keepSlot: si el proceso termina bien, el hueco sigue ocupado para el siguiente paso de
 // la misma petición, que es quien lo libera (release es idempotente).
-const runHeavy = (req, command, args, callback, { keepSlot = false, timeoutMs = HEAVY_EXEC_TIMEOUT_MS } = {}) => {
-    const child = execFile(command, args, { timeout: timeoutMs, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
+const runHeavy = (req, command, args, callback, { keepSlot = false, timeoutMs = HEAVY_EXEC_TIMEOUT_MS, env } = {}) => {
+    const options = { timeout: timeoutMs, killSignal: 'SIGKILL' };
+    if (env) options.env = env;
+    const child = execFile(command, args, options, (error, stdout, stderr) => {
         if ((!keepSlot || error) && req.releaseSlot) req.releaseSlot();
         callback(error, stdout, stderr);
     });
@@ -339,7 +356,23 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
     const gsOutputPath = `${inputPath}_gs.pdf`; // intermedio: salida de Ghostscript
     const outputPath = `${inputPath}_compressed.pdf`; // salida final, tras jpeg_flate.py
     const tempFiles = [inputPath, gsOutputPath, outputPath];
-    cleanupOnClose(res, tempFiles);
+    // Carpeta temporal propia de Ghostscript (TMPDIR en Linux, TEMP/TMP en Windows): sus
+    // archivos de trabajo (gs_*) no quedan sueltos en /tmp si se le mata por el tope de
+    // tiempo. Se borra con el resto de temporales y, en último caso, con el barrido.
+    const gsTmpDir = path.join(UPLOAD_DIR, `gs-${uuidv4()}`);
+    const cleanupAll = () => {
+        secureCleanup(tempFiles);
+        removeTempDir(gsTmpDir);
+    };
+    res.once('close', cleanupAll);
+    try {
+        fs.mkdirSync(gsTmpDir);
+    } catch (e) {
+        console.error('Error creando la carpeta temporal de Ghostscript:', e);
+        cleanupAll();
+        return res.status(500).json({ error: 'Fallo en el motor de compresión.' });
+    }
+    const gsEnv = { ...process.env, TMPDIR: gsTmpDir, TEMP: gsTmpDir, TMP: gsTmpDir };
 
     // hasOwn: `level` viene del cliente; evita claves heredadas como "constructor".
     const { pdfSettings, colorDpi, monoDpi } =
@@ -363,7 +396,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
     runHeavy(req, 'gs', args, (error, stdout, stderr) => {
         if (error) {
             console.error("Error en compresión:", stderr);
-            secureCleanup(tempFiles);
+            cleanupAll();
             return sendExecError(res, error, 'Fallo en el motor de compresión.');
         }
 
@@ -381,10 +414,10 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
         } catch (e) {
             if (req.releaseSlot) req.releaseSlot();
             console.error("Error lanzando el paso posterior de la compresión:", e);
-            secureCleanup(tempFiles);
+            cleanupAll();
             res.status(500).json({ error: 'Fallo en el motor de compresión.' });
         }
-    }, { keepSlot: true, timeoutMs: COMPRESS_TOTAL_TIMEOUT_MS });
+    }, { keepSlot: true, timeoutMs: COMPRESS_TOTAL_TIMEOUT_MS, env: gsEnv });
 
     function sendCompressed(error, stdout, stderr) {
         // Tope agotado en jpeg_flate.py: la salida de gs ya es un PDF válido, solo le falta
@@ -395,7 +428,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
         }
         if (error) {
             console.error("Error en el paso posterior de la compresión:", stderr);
-            secureCleanup(tempFiles);
+            cleanupAll();
             return sendExecError(res, error, 'Fallo en el motor de compresión.');
         }
         sendResult(outputPath);
@@ -411,7 +444,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
             outputSize = fs.statSync(resultPath).size;
         } catch (statError) {
             console.error("Error leyendo el resultado de la compresión:", statError);
-            secureCleanup(tempFiles);
+            cleanupAll();
             return res.status(500).json({ error: 'Fallo en el motor de compresión.' });
         }
         const compressed = outputSize <= inputSize * (1 - MIN_COMPRESS_SAVING);
@@ -422,7 +455,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
         // Envío del resultado y borrado de los temporales al terminar el envío (con
         // éxito o con error; no hay confirmación de que el navegador lo guardase)
         res.sendFile(compressed ? resultPath : inputPath, (err) => {
-            secureCleanup(tempFiles);
+            cleanupAll();
         });
     }
 });

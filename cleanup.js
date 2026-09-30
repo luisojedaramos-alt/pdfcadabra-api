@@ -1,9 +1,10 @@
 const fs = require('fs');
 const path = require('path');
 
-// Borra de `dir` los archivos cuya última modificación tiene más de `maxAgeMs`.
-// Red de seguridad para lo que el borrado por petición no alcanza (proceso
-// reiniciado o matado a mitad de una petición). Devuelve cuántos borró.
+// Borra de `dir` los archivos y subcarpetas (con todo su contenido, p. ej. la carpeta
+// temporal de Ghostscript de una petición) cuya última modificación tiene más de
+// `maxAgeMs`. Red de seguridad para lo que el borrado por petición no alcanza (proceso
+// reiniciado o matado a mitad de una petición). Devuelve cuántas entradas borró.
 const sweepOldFiles = async (dir, maxAgeMs, now = Date.now()) => {
     let entries;
     try {
@@ -18,8 +19,10 @@ const sweepOldFiles = async (dir, maxAgeMs, now = Date.now()) => {
         const file = path.join(dir, name);
         try {
             const stat = await fs.promises.stat(file);
-            if (!stat.isFile() || now - stat.mtimeMs <= maxAgeMs) continue;
-            await fs.promises.unlink(file);
+            if (now - stat.mtimeMs <= maxAgeMs) continue;
+            if (stat.isFile()) await fs.promises.unlink(file);
+            else if (stat.isDirectory()) await fs.promises.rm(file, { recursive: true, force: true });
+            else continue;
             removed++;
         } catch (err) {
             // ENOENT: lo borró entretanto la propia petición.
@@ -34,7 +37,7 @@ const sweepOldFiles = async (dir, maxAgeMs, now = Date.now()) => {
 const startPeriodicSweep = (dir, maxAgeMs, intervalMs) => {
     const run = () => sweepOldFiles(dir, maxAgeMs)
         .then((removed) => {
-            if (removed > 0) console.warn(`[Limpieza] ${removed} archivo(s) temporales con más de ${maxAgeMs / 60000} min borrados.`);
+            if (removed > 0) console.warn(`[Limpieza] ${removed} temporal(es) (archivos o carpetas) con más de ${maxAgeMs / 60000} min borrados.`);
         })
         .catch((err) => console.error('Error en la limpieza periódica:', err));
     run();

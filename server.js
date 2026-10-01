@@ -340,16 +340,14 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
 const MIN_COMPRESS_SAVING = 0.02;
 
 // Niveles de compresión: preset de Ghostscript + resolución objetivo (ppp) de las
-// imágenes en color/gris y de las de blanco y negro (null = no se reducen).
-// El color/gris usa umbral 1.5: solo se reduce lo que supere 1,5 × el objetivo
-// (~225 ppp en recomendada, ~165 en extrema). Así los fondos JPEG de 150 ppp de los
-// escaneos no se recodifican (es lo que más tiempo cuesta y apenas ahorra), pero las
-// fotos de alta resolución (informes periciales, fotos de daños) sí se reducen.
+// imágenes en color/gris y de las de blanco y negro (null = no se reducen) + calidad
+// JPEG con la que se recodifican las de color/gris (QFactor de Ghostscript; calibrado
+// con gs 10: QFactor = (100 − calidad IJG) / 50, así que 0,5 ≈ calidad 75 y 0,8 ≈ 60).
 // extreme: máximo ahorro · recommended: balance ideal LexNET · low: sin reducir nada
 const COMPRESS_LEVELS = {
-    extreme: { pdfSettings: '/screen', colorDpi: 110, monoDpi: 150 },
-    recommended: { pdfSettings: '/ebook', colorDpi: 150, monoDpi: 200 },
-    low: { pdfSettings: '/printer', colorDpi: null, monoDpi: null }
+    extreme: { pdfSettings: '/screen', colorDpi: 110, monoDpi: 150, jpegQFactor: 0.8 },
+    recommended: { pdfSettings: '/ebook', colorDpi: 150, monoDpi: 200, jpegQFactor: 0.5 },
+    low: { pdfSettings: '/printer', colorDpi: null, monoDpi: null, jpegQFactor: null }
 };
 
 // Parámetros de reducción de un tipo de imagen ('Color', 'Gray' o 'Mono') para Ghostscript.
@@ -357,6 +355,41 @@ const downsampleArgs = (kind, dpi, threshold) =>
     dpi === null
         ? [`-dDownsample${kind}Images=false`]
         : [`-dDownsample${kind}Images=true`, `-d${kind}ImageResolution=${dpi}`, `-d${kind}ImageDownsampleThreshold=${threshold}`];
+
+// Argumentos de Ghostscript para un nivel. Se exporta para medir en local con el mismo
+// comando exacto que usa el servidor.
+//
+// Color y gris (recomendada y extrema): umbral 1.0, así que se reduce todo lo que pase de
+// la resolución objetivo, y siempre a JPEG con la calidad del nivel. Sin forzar JPEG,
+// Ghostscript elegía Flate (sin pérdida) para muchas fotos: en un expediente unido de 155
+// páginas la salida pesaba un 61 % MÁS que la entrada, y codificar en Flate era además lo
+// más lento (130 s frente a 55 s con 0,5 CPU). PassThroughJPEGImages=false: los JPEG que no
+// se reducen también se recodifican con la calidad del nivel.
+// Blanco y negro: siempre sin pérdida (CCITT G4; pdfwrite no codifica JBIG2). Umbral 1.0
+// (el mínimo), porque con el 1.5 por defecto 300 ppp no llega a bajar a 200; /Subsample es
+// el único método que Ghostscript admite para B/N. Los presets nunca reducen las imágenes
+// en blanco y negro (CCITT), que en los escaneos de juzgado suponen la mayor parte del peso.
+// Baja: sin reducir ni recodificar imágenes (solo reescritura, fuentes y deduplicación).
+const compressArgs = ({ pdfSettings, colorDpi, monoDpi, jpegQFactor }, inputPath, outputPath) => {
+    const jpeg = jpegQFactor !== null;
+    const imageDict = `<< /QFactor ${jpegQFactor} /Blend 1 /HSamples [2 1 1 2] /VSamples [2 1 1 2] >>`;
+    return [
+        '-sDEVICE=pdfwrite', '-dCompatibilityLevel=1.4', `-dPDFSETTINGS=${pdfSettings}`,
+        ...downsampleArgs('Color', colorDpi, 1.0),
+        ...downsampleArgs('Gray', colorDpi, 1.0),
+        ...(jpeg ? [
+            '-dAutoFilterColorImages=false', '-dColorImageFilter=/DCTEncode',
+            '-dAutoFilterGrayImages=false', '-dGrayImageFilter=/DCTEncode',
+            '-dPassThroughJPEGImages=false'
+        ] : []),
+        ...downsampleArgs('Mono', monoDpi, 1.0), '-dMonoImageDownsampleType=/Subsample',
+        '-dMonoImageFilter=/CCITTFaxEncode',
+        '-dNOPAUSE', '-dQUIET', '-dBATCH', `-sOutputFile=${outputPath}`,
+        // La calidad JPEG solo se puede fijar con setdistillerparams (después del preset).
+        ...(jpeg ? ['-c', `<< /ColorImageDict ${imageDict} /GrayImageDict ${imageDict} >> setdistillerparams`, '-f'] : []),
+        inputPath
+    ];
+};
 
 app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
     if (!req.file) {
@@ -387,20 +420,8 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
     const gsEnv = { ...process.env, TMPDIR: gsTmpDir, TEMP: gsTmpDir, TMP: gsTmpDir };
 
     // hasOwn: `level` viene del cliente; evita claves heredadas como "constructor".
-    const { pdfSettings, colorDpi, monoDpi } =
-        Object.hasOwn(COMPRESS_LEVELS, level) ? COMPRESS_LEVELS[level] : COMPRESS_LEVELS.recommended;
-
-    const args = [
-        '-sDEVICE=pdfwrite', '-dCompatibilityLevel=1.4', `-dPDFSETTINGS=${pdfSettings}`,
-        // Resoluciones explícitas: los presets nunca reducen las imágenes en blanco y
-        // negro (CCITT), que en los escaneos de juzgado suponen la mayor parte del peso.
-        ...downsampleArgs('Color', colorDpi, 1.5),
-        ...downsampleArgs('Gray', colorDpi, 1.5),
-        // B/N: umbral 1.0 (el mínimo), porque con el 1.5 por defecto 300 ppp no llega a
-        // bajar a 200. /Subsample es el único método que Ghostscript admite para B/N.
-        ...downsampleArgs('Mono', monoDpi, 1.0), '-dMonoImageDownsampleType=/Subsample',
-        '-dNOPAUSE', '-dQUIET', '-dBATCH', `-sOutputFile=${gsOutputPath}`, inputPath
-    ];
+    const conf = Object.hasOwn(COMPRESS_LEVELS, level) ? COMPRESS_LEVELS[level] : COMPRESS_LEVELS.recommended;
+    const args = compressArgs(conf, inputPath, gsOutputPath);
 
     // gs y jpeg_flate.py comparten un único tope: jpeg_flate.py solo tiene lo que sobre.
     const deadline = Date.now() + COMPRESS_TOTAL_TIMEOUT_MS;
@@ -503,3 +524,6 @@ if (require.main === module) {
 }
 
 module.exports = app;
+// Para medir en local con el mismo comando de Ghostscript que el servidor.
+module.exports.compressArgs = compressArgs;
+module.exports.COMPRESS_LEVELS = COMPRESS_LEVELS;

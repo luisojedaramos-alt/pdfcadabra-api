@@ -35,7 +35,7 @@ app.use(cors({
             callback(null, false);
         }
     },
-    exposedHeaders: ['X-Redact-Warnings', 'X-Compress-Status']
+    exposedHeaders: ['X-Redact-Warnings', 'X-Compress-Status', 'X-Compress-Level']
 }));
 
 // Health check de Render: responde al instante, antes de los parsers de body y de
@@ -105,7 +105,8 @@ const removeTempDir = (dir) => {
 // Red de seguridad: borra de UPLOAD_DIR lo que tenga más de 15 minutos, al arrancar y
 // cada 5 minutos (archivos que quedaron si el proceso murió a mitad de una petición).
 // Ninguna petición legítima dura tanto: cola máx. 90 s + máx. 180 s por proceso (por
-// defecto), y la ruta más larga (compresión) encadena dos procesos: 7,5 min en total.
+// defecto) en Anonimizar; Comprimir encadena hasta cuatro procesos (gs y jpeg_flate.py,
+// más la red de seguridad), pero todos dentro de COMPRESS_TOTAL_TIMEOUT_MS.
 const SWEEP_MAX_AGE_MS = 15 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 startPeriodicSweep(UPLOAD_DIR, SWEEP_MAX_AGE_MS, SWEEP_INTERVAL_MS);
@@ -133,7 +134,8 @@ const envInt = (name, fallback) => {
 // Tope por proceso de Anonimizar (redact.py search/apply). Comprimir usa su propio tope
 // total, COMPRESS_TOTAL_TIMEOUT_MS.
 const HEAVY_EXEC_TIMEOUT_MS = envInt('HEAVY_EXEC_TIMEOUT_MS', 180000);
-// Tope TOTAL de /v1/compress, Ghostscript y jpeg_flate.py juntos. Peor caso medido en la
+// Tope TOTAL de /v1/compress: Ghostscript y jpeg_flate.py juntos, también los de la red de
+// seguridad con el nivel low. Peor caso medido en la
 // instancia 0.5c-512mb (escaneo sintético de 20 MB y 23 páginas, nivel extremo): 14,4 s de
 // gs + 0,4 s de jpeg_flate.py. 90 s dejan margen para escaneos reales con muchas más
 // páginas: gs escala con páginas y píxeles, no con MB.
@@ -336,7 +338,7 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
 // ==========================================
 // MÓDULO 3: COMPRESIÓN AVANZADA (Ghostscript)
 // ==========================================
-// Ahorro mínimo (2 %) para devolver la salida de Ghostscript en vez del original.
+// Ahorro mínimo (2 %) para devolver un resultado en vez del original.
 const MIN_COMPRESS_SAVING = 0.02;
 
 // Niveles de compresión: preset de Ghostscript + resolución objetivo (ppp) de las
@@ -397,10 +399,14 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
     }
 
     const inputPath = req.file.path;
-    const level = req.body.level || 'recommended';
-    const gsOutputPath = `${inputPath}_gs.pdf`; // intermedio: salida de Ghostscript
-    const outputPath = `${inputPath}_compressed.pdf`; // salida final, tras jpeg_flate.py
-    const tempFiles = [inputPath, gsOutputPath, outputPath];
+    // hasOwn: `level` viene del cliente; evita claves heredadas como "constructor".
+    const level = Object.hasOwn(COMPRESS_LEVELS, req.body.level) ? req.body.level : 'recommended';
+    // Intermedio (salida de Ghostscript) y salida final (tras jpeg_flate.py) de la pasada
+    // del nivel pedido y, si hace falta, de la red de seguridad con el nivel low.
+    const passPaths = (tag) => ({ gs: `${inputPath}_${tag}_gs.pdf`, out: `${inputPath}_${tag}.pdf` });
+    const primaryPaths = passPaths('compressed');
+    const fallbackPaths = passPaths('fallback');
+    const tempFiles = [inputPath, primaryPaths.gs, primaryPaths.out, fallbackPaths.gs, fallbackPaths.out];
     // Carpeta temporal propia de Ghostscript (TMPDIR en Linux, TEMP/TMP en Windows): sus
     // archivos de trabajo (gs_*) no quedan sueltos en /tmp si se le mata por el tope de
     // tiempo. Se borra con el resto de temporales y, en último caso, con el barrido.
@@ -419,78 +425,107 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
     }
     const gsEnv = { ...process.env, TMPDIR: gsTmpDir, TEMP: gsTmpDir, TMP: gsTmpDir };
 
-    // hasOwn: `level` viene del cliente; evita claves heredadas como "constructor".
-    const conf = Object.hasOwn(COMPRESS_LEVELS, level) ? COMPRESS_LEVELS[level] : COMPRESS_LEVELS.recommended;
-    const args = compressArgs(conf, inputPath, gsOutputPath);
-
-    // gs y jpeg_flate.py comparten un único tope: jpeg_flate.py solo tiene lo que sobre.
+    // Todos los procesos (gs y jpeg_flate.py, también los de la red de seguridad) comparten
+    // un único tope: cada uno solo tiene lo que sobre. El hueco de la cola se mantiene hasta
+    // la respuesta (keepSlot) y se libera al enviarla (release es idempotente).
     const deadline = Date.now() + COMPRESS_TOTAL_TIMEOUT_MS;
+    const remaining = () => deadline - Date.now();
+    const releaseSlot = () => {
+        if (req.releaseSlot) req.releaseSlot();
+    };
 
-    runHeavy(req, 'gs', args, (error, stdout, stderr) => {
-        if (error) {
-            logProcessError("Error en compresión:", error, stderr);
-            cleanupAll();
-            return sendExecError(res, error, 'Fallo en el motor de compresión.');
-        }
-
-        const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0) {
-            if (req.releaseSlot) req.releaseSlot();
-            console.warn('Tope de compresión agotado tras Ghostscript; se envía su salida sin jpeg_flate.py.');
-            return sendResult(gsOutputPath);
-        }
-
-        // Ghostscript quita la capa Flate a los JPEG que la llevaban: jpeg_flate.py la
-        // restaura (sin pérdida) cuando reduce su tamaño. Usa el mismo hueco de la cola.
-        try {
-            runHeavy(req, 'python3', ['jpeg_flate.py', gsOutputPath, outputPath], sendCompressed, { timeoutMs: remainingMs });
-        } catch (e) {
-            if (req.releaseSlot) req.releaseSlot();
-            console.error("Error lanzando el paso posterior de la compresión:", describeError(e));
-            cleanupAll();
-            res.status(500).json({ error: 'Fallo en el motor de compresión.' });
-        }
-    }, { keepSlot: true, timeoutMs: COMPRESS_TOTAL_TIMEOUT_MS, env: gsEnv });
-
-    function sendCompressed(error, stdout, stderr) {
-        // Tope agotado en jpeg_flate.py: la salida de gs ya es un PDF válido, solo le falta
-        // restaurar la capa Flate de algunos JPEG. Mejor eso que un error.
-        if (error && isExecTimeout(error)) {
-            console.warn('Tope de compresión agotado en jpeg_flate.py; se envía la salida de Ghostscript.');
-            return sendResult(gsOutputPath);
-        }
-        if (error) {
-            logProcessError("Error en el paso posterior de la compresión:", error, stderr);
-            cleanupAll();
-            return sendExecError(res, error, 'Fallo en el motor de compresión.');
-        }
-        sendResult(outputPath);
+    // Una pasada: Ghostscript y después jpeg_flate.py. done(fallo, rutaDelResultado).
+    function runPass(conf, { gs: gsPath, out: outPath }, done) {
+        runHeavy(req, 'gs', compressArgs(conf, inputPath, gsPath), (error, stdout, stderr) => {
+            if (error) return done({ error, stderr, label: 'Error en compresión:' });
+            if (remaining() <= 0) {
+                console.warn('Tope de compresión agotado tras Ghostscript; se usa su salida sin jpeg_flate.py.');
+                return done(null, gsPath);
+            }
+            // Ghostscript quita la capa Flate a los JPEG que la llevaban: jpeg_flate.py la
+            // restaura (sin pérdida) cuando reduce su tamaño.
+            try {
+                runHeavy(req, 'python3', ['jpeg_flate.py', gsPath, outPath], (error, stdout, stderr) => {
+                    // Tope agotado en jpeg_flate.py: la salida de gs ya es un PDF válido, solo le
+                    // falta restaurar la capa Flate de algunos JPEG. Mejor eso que un error.
+                    if (error && isExecTimeout(error)) {
+                        console.warn('Tope de compresión agotado en jpeg_flate.py; se usa la salida de Ghostscript.');
+                        return done(null, gsPath);
+                    }
+                    if (error) return done({ error, stderr, label: 'Error en el paso posterior de la compresión:' });
+                    done(null, outPath);
+                }, { keepSlot: true, timeoutMs: remaining() });
+            } catch (e) {
+                console.error('Error lanzando el paso posterior de la compresión:', describeError(e));
+                done({ error: e });
+            }
+        }, { keepSlot: true, timeoutMs: Math.max(1, remaining()), env: gsEnv });
     }
 
-    function sendResult(resultPath) {
-        // El resultado puede pesar más que el original (p. ej. si ya estaba optimizado).
-        // Si el tamaño final no ahorra al menos MIN_COMPRESS_SAVING, devolvemos el
-        // original tal cual y lo indicamos en X-Compress-Status.
-        let inputSize, outputSize;
+    // ¿Ahorra al menos MIN_COMPRESS_SAVING frente al original? null si no se puede leer.
+    function savesEnough(resultPath) {
         try {
-            inputSize = fs.statSync(inputPath).size;
-            outputSize = fs.statSync(resultPath).size;
+            return fs.statSync(resultPath).size <= fs.statSync(inputPath).size * (1 - MIN_COMPRESS_SAVING);
         } catch (statError) {
-            console.error("Error leyendo el resultado de la compresión:", describeError(statError));
-            cleanupAll();
-            return res.status(500).json({ error: 'Fallo en el motor de compresión.' });
+            console.error('Error leyendo el resultado de la compresión:', describeError(statError));
+            return null;
         }
-        const compressed = outputSize <= inputSize * (1 - MIN_COMPRESS_SAVING);
+    }
+
+    function fail({ error, stderr, label }) {
+        releaseSlot();
+        if (label) logProcessError(label, error, stderr);
+        cleanupAll();
+        return sendExecError(res, error, 'Fallo en el motor de compresión.');
+    }
+
+    function statFailed() {
+        releaseSlot();
+        cleanupAll();
+        return res.status(500).json({ error: 'Fallo en el motor de compresión.' });
+    }
+
+    // X-Compress-Status: 'compressed', o 'already-optimized' si se devuelve el original
+    // porque nada lo redujo al menos un MIN_COMPRESS_SAVING (el valor se mantiene por
+    // compatibilidad con el frontend). X-Compress-Level: nivel aplicado de verdad
+    // ('extreme', 'recommended', 'low', o 'none' si se devuelve el original).
+    function send(resultPath, appliedLevel) {
+        releaseSlot();
+        const compressed = resultPath !== null;
         res.setHeader('X-Compress-Status', compressed ? 'compressed' : 'already-optimized');
+        res.setHeader('X-Compress-Level', compressed ? appliedLevel : 'none');
         // El archivo de multer no tiene extensión: sin esto se enviaría como octet-stream.
         res.type('application/pdf');
-
         // Envío del resultado y borrado de los temporales al terminar el envío (con
         // éxito o con error; no hay confirmación de que el navegador lo guardase)
-        res.sendFile(compressed ? resultPath : inputPath, (err) => {
-            cleanupAll();
-        });
+        res.sendFile(compressed ? resultPath : inputPath, () => cleanupAll());
     }
+
+    runPass(COMPRESS_LEVELS[level], primaryPaths, (err, resultPath) => {
+        if (err) return fail(err);
+        const ok = savesEnough(resultPath);
+        if (ok === null) return statFailed();
+        if (ok) return send(resultPath, level);
+        // Red de seguridad: si recomendada o extrema no reducen, se intenta con la lógica
+        // de low (reescritura, fuentes y deduplicación, sin tocar imágenes) dentro del
+        // mismo tope antes de devolver el original.
+        if (level === 'low' || remaining() <= 0) return send(null);
+        console.warn(`Compresión ${level} sin ahorro suficiente; se reintenta con el nivel low.`);
+        runPass(COMPRESS_LEVELS.low, fallbackPaths, (fallbackErr, fallbackPath) => {
+            // Si la red de seguridad falla o se queda sin tiempo, el original sigue siendo
+            // una respuesta válida: no se convierte en error.
+            if (fallbackErr) {
+                if (fallbackErr.label) {
+                    const label = fallbackErr.label.replace(/:$/, ' (red de seguridad, nivel low):');
+                    logProcessError(label, fallbackErr.error, fallbackErr.stderr);
+                }
+                return send(null);
+            }
+            const fallbackOk = savesEnough(fallbackPath);
+            if (fallbackOk === null) return statFailed();
+            send(fallbackOk ? fallbackPath : null, 'low');
+        });
+    });
 });
 
 // Manejo de errores no gestionados: debe ir el último y tener 4 argumentos para que

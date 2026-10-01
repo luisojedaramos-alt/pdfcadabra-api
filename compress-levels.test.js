@@ -1,5 +1,7 @@
 // Niveles de /v1/compress: argumentos de Ghostscript (JPEG forzado en recomendada y
-// extrema, B/N siempre sin pérdida).
+// extrema, B/N siempre sin pérdida) y red de seguridad con el nivel low cuando el nivel
+// pedido no reduce al menos un 2 %. gs y jpeg_flate.py se simulan sustituyendo execFile
+// antes de cargar server.js (como en compress-timeout.test.js).
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -86,4 +88,89 @@ test('baja: sin cambios (ni reducción ni JPEG forzado)', () => {
     assert.ok(!args.includes('-c'));
     assert.ok(!args.some((a) => a.includes('DCTEncode') || a.includes('PassThroughJPEG')));
     assert.equal(args.at(-1), 'in.pdf');
+});
+
+test('si el nivel pedido reduce, no hay red de seguridad', async (t) => {
+    calls.length = 0;
+    gsSizes = { '/ebook': 4000, '/printer': 3000 };
+    const { res, body } = await compress(t, 'recommended');
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('x-compress-status'), 'compressed');
+    assert.equal(res.headers.get('x-compress-level'), 'recommended');
+    assert.equal(body.length, 4000);
+    assert.deepEqual(gsPresets(), ['-dPDFSETTINGS=/ebook']);
+});
+
+test('si recomendada no reduce, se reintenta con low y se indica en la cabecera', async (t) => {
+    calls.length = 0;
+    gsSizes = { '/ebook': 15000, '/printer': 6000 };
+    const { res, body } = await compress(t, 'recommended');
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('x-compress-status'), 'compressed');
+    assert.equal(res.headers.get('x-compress-level'), 'low');
+    assert.equal(body.length, 6000);
+    assert.deepEqual(gsPresets(), ['-dPDFSETTINGS=/ebook', '-dPDFSETTINGS=/printer']);
+    // Los procesos de la red de seguridad comparten el tope: nunca más que el total.
+    const [first, second] = calls.filter((c) => c.command === 'gs');
+    assert.ok(second.options.timeout <= first.options.timeout);
+    for (const f of outputs()) assert.equal(fs.existsSync(f), false, `${f} debe borrarse`);
+});
+
+test('extrema con un ahorro menor del 2 % también activa la red de seguridad', async (t) => {
+    calls.length = 0;
+    gsSizes = { '/screen': 9900, '/printer': 5000 };
+    const { res } = await compress(t, 'extreme');
+    assert.equal(res.headers.get('x-compress-level'), 'low');
+    assert.deepEqual(gsPresets(), ['-dPDFSETTINGS=/screen', '-dPDFSETTINGS=/printer']);
+});
+
+test('si tampoco low reduce, se devuelve el original', async (t) => {
+    calls.length = 0;
+    gsSizes = { '/ebook': 15000, '/printer': 12000 };
+    const { res, body } = await compress(t, 'recommended');
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('x-compress-status'), 'already-optimized');
+    assert.equal(res.headers.get('x-compress-level'), 'none');
+    assert.deepEqual(body, INPUT);
+});
+
+test('si la red de seguridad se queda sin tiempo, se devuelve el original (no un 504)', async (t) => {
+    calls.length = 0;
+    gsSizes = { '/ebook': 15000, '/printer': null };
+    const { res, body } = await compress(t, 'recommended');
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('x-compress-status'), 'already-optimized');
+    assert.equal(res.headers.get('x-compress-level'), 'none');
+    assert.deepEqual(body, INPUT);
+});
+
+test('si gs agota el tope en el nivel pedido, 504 (sin red de seguridad)', async (t) => {
+    calls.length = 0;
+    gsSizes = { '/ebook': null, '/printer': 1000 };
+    const { res } = await compress(t, 'recommended');
+    assert.equal(res.status, 504);
+    assert.deepEqual(gsPresets(), ['-dPDFSETTINGS=/ebook']);
+});
+
+test('low sin ahorro: el original, sin segunda pasada', async (t) => {
+    calls.length = 0;
+    gsSizes = { '/printer': 12000 };
+    const { res } = await compress(t, 'low');
+    assert.equal(res.headers.get('x-compress-status'), 'already-optimized');
+    assert.deepEqual(gsPresets(), ['-dPDFSETTINGS=/printer']);
+});
+
+test('X-Compress-Level se expone por CORS', async (t) => {
+    calls.length = 0;
+    gsSizes = { '/ebook': 4000 };
+    const server = app.listen(0);
+    t.after(() => server.close());
+    await new Promise((r) => server.once('listening', r));
+    const form = new FormData();
+    form.append('file', new Blob([INPUT], { type: 'application/pdf' }), 'in.pdf');
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/v1/compress`, {
+        method: 'POST', body: form, headers: { Origin: 'https://pdfcadabra.com' }
+    });
+    await res.arrayBuffer();
+    assert.match(res.headers.get('access-control-expose-headers'), /X-Compress-Level/);
 });

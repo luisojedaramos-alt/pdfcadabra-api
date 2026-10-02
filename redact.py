@@ -224,6 +224,23 @@ def flatten_document(doc):
     return pending
 
 
+def compact_xref(doc):
+    """doc.scrub() aborta ("bad xref - clean PDF before scrubbing") si la tabla xref tiene
+    huecos: números de objeto sin objeto, algo válido en un PDF (p. ej. tras una
+    actualización incremental o al quitar objetos al unir). En ese caso se reabre el
+    documento serializado con garbage=3, que renumera los objetos sin huecos."""
+    for xref in range(1, doc.xref_length()):
+        try:
+            if doc.xref_object(xref):
+                continue
+        except Exception:
+            pass
+        compact = fitz.open("pdf", doc.tobytes(garbage=3))
+        doc.close()
+        return compact
+    return doc
+
+
 # ==========================================
 # 3. TEXTO Y TÉRMINOS
 # ==========================================
@@ -566,6 +583,7 @@ def apply(input_path, output_path, items):
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
 
     remove_outline_terms(doc, terms)
+    doc = compact_xref(doc)
 
     # Limpieza forense. Todo a True salvo:
     # - redactions: ya aplicadas arriba, con PDF_REDACT_IMAGE_PIXELS.

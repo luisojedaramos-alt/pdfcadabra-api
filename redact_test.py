@@ -3,6 +3,7 @@
 Uso: python -m unittest redact_test.py   (necesita PyMuPDF, como redact.py)
 """
 import os
+import struct
 import tempfile
 import unittest
 import zlib
@@ -255,6 +256,47 @@ class Fallo2OperadorComillaArchivo7(unittest.TestCase):
             redact.normalize_quote_operators = real
         self.assertTrue(report["verified"])
         self.assertEqual(report["text_loss_pages"], [1])
+
+
+def make_xref_gap_pdf(path):
+    """xref en flujo con /Index por tramos ([0 5 8 2]: faltan los objetos 5 a 7), como la
+    que escribe pdf-lib (p. ej. la salida de Unir). Es válido, pero doc.scrub() aborta."""
+    content = f"BT /F1 11 Tf 60 780 Td (Expediente {TERM} de prueba) Tj ET".encode()
+    objs = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 8 0 R >>",
+        4: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        8: b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream",
+    }
+    out = bytearray(b"%PDF-1.5\n")
+    off = {}
+    for n, body in objs.items():
+        off[n] = len(out)
+        out += b"%d 0 obj\n" % n + body + b"\nendobj\n"
+    off[9] = len(out)
+    rows = b"".join(
+        struct.pack(">BIH", 0 if n == 0 else 1, off.get(n, 0), 65535 if n == 0 else 0)
+        for n in (0, 1, 2, 3, 4, 8, 9)
+    )
+    out += b"9 0 obj\n<< /Type /XRef /Size 10 /Root 1 0 R /W [1 4 2] /Index [0 5 8 2] /Length %d >>\n" % len(rows)
+    out += b"stream\n" + rows + b"\nendstream\nendobj\nstartxref\n%d\n%%%%EOF\n" % off[9]
+    with open(path, "wb") as f:
+        f.write(out)
+
+
+class XrefConHuecos(unittest.TestCase):
+    """doc.scrub() abortaba con "cannot find object in xref" en PDFs salidos de Unir."""
+
+    def test_se_censura_igual(self):
+        src, out = tmp_path(self, "in.pdf"), tmp_path(self, "out.pdf")
+        make_xref_gap_pdf(src)
+        with self.assertRaises(RuntimeError):  # el fallo de PyMuPDF que se esquiva
+            fitz.open(src).scrub()
+        report = redact.apply(src, out, search_items(src, TERM))
+        self.assertTrue(report["verified"], report)
+        self.assertEqual(words(out), ["Expediente", "de", "prueba"])
 
 
 if __name__ == "__main__":

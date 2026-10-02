@@ -7,6 +7,8 @@ const fs = require('fs');
 const childProcess = require('child_process');
 
 const TOTAL_MS = 300;
+// Margen para los topes calculados con Date.now(): el reloj puede avanzar mientras se preparan.
+const TIMER_MARGIN_MS = 20;
 process.env.COMPRESS_TOTAL_TIMEOUT_MS = String(TOTAL_MS);
 
 const GS_OUTPUT = Buffer.from('%PDF-1.4\n% salida simulada de Ghostscript\n%%EOF\n');
@@ -65,7 +67,10 @@ test('si el tope se agota en jpeg_flate.py, devuelve la salida de Ghostscript', 
 
     const gs = calls.find((c) => c.command === 'gs');
     const py = calls.find((c) => c.command === 'python3');
-    assert.equal(gs.options.timeout, TOTAL_MS);
+    // gs recibe lo que queda del tope total: deadline - Date.now() al lanzarlo, así que
+    // puede llegar con 1-2 ms menos si entre medias pasa el reloj (mkdirSync, etc.).
+    assert.ok(gs.options.timeout <= TOTAL_MS && gs.options.timeout >= TOTAL_MS - TIMER_MARGIN_MS,
+        `gs debe tener el tope total, salvo unos ms (tuvo ${gs.options.timeout} ms)`);
     assert.ok(py.options.timeout > 0 && py.options.timeout <= TOTAL_MS - gsDelayMs,
         `jpeg_flate.py solo debe tener el tiempo sobrante (tuvo ${py.options.timeout} ms)`);
     await assertCleanedUp(gsOutputPath());

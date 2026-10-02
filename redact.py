@@ -1,3 +1,4 @@
+import bisect
 import json
 import os
 import re
@@ -266,66 +267,99 @@ def _is_hidden_span(span):
     return False
 
 
-def page_words(page):
-    """Palabras de la página como [(texto, Rect, oculta)], a partir de los caracteres."""
+_TEXT_FLAGS = fitz.TEXT_PRESERVE_SPANS | fitz.TEXT_COLLECT_STYLES
+
+
+class ZoneIndex:
+    """Zonas de una página ordenadas por y0, para no comparar cada palabra con todas."""
+
+    def __init__(self, zones, margin=0.0):
+        self.zones = sorted(
+            (fitz.Rect(z.x0 - margin, z.y0 - margin, z.x1 + margin, z.y1 + margin) for z in zones),
+            key=lambda z: z.y0,
+        )
+        self.y0s = [z.y0 for z in self.zones]
+        self.max_h = max((z.height for z in self.zones), default=0)
+
+    def candidates(self, y0, y1):
+        """Zonas que pueden solaparse verticalmente con [y0, y1]."""
+        lo = bisect.bisect_left(self.y0s, y0 - self.max_h)
+        hi = bisect.bisect_right(self.y0s, y1)
+        return [z for z in self.zones[lo:hi] if z.y1 >= y0]
+
+    def touches(self, r):
+        return any(r.intersects(z) for z in self.candidates(r.y0, r.y1))
+
+    def containing_point(self, x, y):
+        return [z for z in self.candidates(y, y) if z.x0 <= x <= z.x1]
+
+
+def page_words(page, detect_hidden=True):
+    """Palabras de la página como [(texto, Rect, oculta)].
+
+    Las palabras salen de get_text("words") (en C, rápido). Con detect_hidden, "oculta" se
+    decide con los spans de get_text("dict") sobre el mismo textpage: una palabra es oculta
+    si su centro cae en un span oculto. Sin él (la salida, de la que scrub ya quitó el
+    texto oculto) se ahorra el "dict".
+    """
+    tp = page.get_textpage(flags=_TEXT_FLAGS) if detect_hidden else page.get_textpage()
+    hidden = None
+    if detect_hidden:
+        boxes = []
+        for block in page.get_text("dict", textpage=tp).get("blocks", ()):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", ()):
+                for span in line.get("spans", ()):
+                    if _is_hidden_span(span):
+                        boxes.append(fitz.Rect(span["bbox"]))
+        hidden = ZoneIndex(boxes) if boxes else None
     words = []
-    raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_SPANS | fitz.TEXT_COLLECT_STYLES)
-    for block in raw.get("blocks", ()):
-        if block.get("type") != 0:
-            continue
-        for line in block.get("lines", ()):
-            for span in line.get("spans", ()):
-                hidden = _is_hidden_span(span)
-                text, box = [], fitz.Rect()
-                for ch in span.get("chars", ()) + [{"c": " ", "bbox": None}]:
-                    if ch["c"].isspace():
-                        if text:
-                            words.append(("".join(text), box, hidden))
-                        text, box = [], fitz.Rect()
-                        continue
-                    text.append(ch["c"])
-                    box |= fitz.Rect(ch["bbox"])
+    for x0, y0, x1, y1, text, *_ in page.get_text("words", textpage=tp):
+        oculta = bool(hidden and hidden.containing_point((x0 + x1) / 2, (y0 + y1) / 2))
+        words.append((text, fitz.Rect(x0, y0, x1, y1), oculta))
     return words
 
 
-def page_chars(page):
-    """Caracteres de la página como [(carácter, Rect)]."""
-    chars = []
-    raw = page.get_text("rawdict")
-    for block in raw.get("blocks", ()):
+def chars_in_zones(page, zones):
+    """¿Queda algún carácter con el centro dentro de una zona censurada?
+
+    Primero, con las palabras, se buscan las que tocan una zona (tras una censura correcta,
+    solo las vecinas). Solo si hay alguna se mira carácter a carácter (rawdict, más lento).
+    """
+    if not zones:
+        return False
+    index = ZoneIndex(zones)
+    if not any(index.touches(r) for _, r, _ in page_words(page, detect_hidden=False)):
+        return False
+    for block in page.get_text("rawdict").get("blocks", ()):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", ()):
             for span in line.get("spans", ()):
                 for ch in span.get("chars", ()):
-                    if not ch["c"].isspace():
-                        chars.append((ch["c"], fitz.Rect(ch["bbox"])))
-    return chars
+                    if ch["c"].isspace():
+                        continue
+                    x0, y0, x1, y1 = ch["bbox"]
+                    if index.containing_point((x0 + x1) / 2, (y0 + y1) / 2):
+                        return True
+    return False
 
 
-def _center_in(rect, zones):
-    x = (rect.x0 + rect.x1) / 2
-    y = (rect.y0 + rect.y1) / 2
-    return any(z.x0 <= x <= z.x1 and z.y0 <= y <= z.y1 for z in zones)
+def text_under_zones(words, zones):
+    """Texto bajo cada zona (palabras con el centro dentro), una cadena por zona."""
+    index = ZoneIndex(zones)
+    by_zone = {}
+    for w, r, _ in words:
+        for z in index.containing_point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2):
+            by_zone.setdefault(id(z), []).append(w)
+    return [" ".join(ws) for ws in by_zone.values()]
 
 
-def text_under_zones(page, zones):
-    """Texto que hay bajo cada zona (caracteres con el centro dentro), una cadena por zona."""
-    chars = page_chars(page)
-    out = []
-    for z in zones:
-        s = "".join(c for c, r in chars if _center_in(r, [z]))
-        if s:
-            out.append(s)
-    return out
-
-
-def visible_words_outside(page, zones, margin=1.0):
+def visible_words_outside(words, zones, margin=1.0):
     """Palabras visibles que no tocan ninguna zona: deben sobrevivir a la censura."""
-    grown = [fitz.Rect(z.x0 - margin, z.y0 - margin, z.x1 + margin, z.y1 + margin) for z in zones]
-    return Counter(
-        w for w, r, hidden in page_words(page) if not hidden and not any(r.intersects(g) for g in grown)
-    )
+    index = ZoneIndex(zones, margin)
+    return Counter(w for w, r, hidden in words if not hidden and not index.touches(r))
 
 
 # ==========================================
@@ -383,8 +417,7 @@ def verify_redaction(path, zones_by_page, terms):
     doc = fitz.open(path)
     try:
         for page in doc:
-            zones = zones_by_page.get(page.number)
-            if zones and any(_center_in(r, zones) for _, r in page_chars(page)):
+            if chars_in_zones(page, zones_by_page.get(page.number)):
                 leaks.add("page_text")
             for w in page.widgets():
                 if any(_contains_term(v, terms) for v in (w.field_value, w.field_label, w.field_name)):
@@ -430,7 +463,9 @@ def text_loss_pages(path, zones_by_page, words_before):
             page.number + 1
             for page in doc
             if words_before.get(page.number, Counter())
-            - visible_words_outside(page, zones_by_page.get(page.number, []))
+            - visible_words_outside(
+                page_words(page, detect_hidden=False), zones_by_page.get(page.number, [])
+            )
         ]
     finally:
         doc.close()
@@ -570,11 +605,12 @@ def apply(input_path, output_path, items):
     words_before = {}
     for page in doc:
         zones = zones_by_page.get(page.number, [])
-        for s in text_under_zones(page, zones):
+        words = page_words(page)
+        for s in text_under_zones(words, zones):
             t = norm(s)
             if len(t) >= MIN_TERM_LEN:
                 terms.add(t)
-        words_before[page.number] = visible_words_outside(page, zones)
+        words_before[page.number] = visible_words_outside(words, zones)
 
     for page in doc:
         if page.number in zones_by_page:

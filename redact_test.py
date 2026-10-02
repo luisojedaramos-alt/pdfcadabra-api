@@ -220,6 +220,23 @@ class VerificacionFinal(unittest.TestCase):
         self.assertEqual(redact.verify_redaction(path, {0: [fitz.Rect(0, 0, 1, 1)]}, {TERM}), [])
 
 
+class TextoOculto(unittest.TestCase):
+    def test_capa_invisible_no_cuenta_como_texto_perdido(self):
+        """scrub(hidden_text=True) quita una capa invisible (como la de un OCR): no es una
+        pérdida que haya que avisar, y lo visible fuera de la zona se conserva."""
+        src, out = tmp_path(self, "in.pdf"), tmp_path(self, "out.pdf")
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((60, 60), f"Visible {TERM} conservado", fontsize=12)
+        page.insert_text((60, 400), "capa invisible de OCR", fontsize=12, render_mode=3)
+        doc.save(src)
+        doc.close()
+        report = redact.apply(src, out, search_items(src, TERM))
+        self.assertTrue(report["verified"], report)
+        self.assertEqual(report["text_loss_pages"], [])
+        self.assertEqual(words(out), ["Visible", "conservado"])
+
+
 class Fallo2OperadorComillaArchivo7(unittest.TestCase):
     """Con texto escrito con ', censurar un DNI borraba todo el texto de la página."""
 

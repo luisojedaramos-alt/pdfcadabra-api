@@ -16,11 +16,25 @@ const port = process.env.PORT || 3000;
 
 // 1. Configuración de middlewares y límites de carga pesada (100 MB para LexNET)
 // AÑADIDO: exposedHeaders para que React pueda leer nuestras alertas de censura
-// Orígenes permitidos: solo el dominio de producción (+ localhost si NODE_ENV no es 'production').
+// Orígenes permitidos: solo el dominio de producción (+ localhost si NODE_ENV no es 'production'),
+// más los de EXTRA_ALLOWED_ORIGINS (separados por comas, p. ej. el branch deploy de dev para la
+// QA). Solo se aceptan orígenes https exactos (sin ruta, comodines ni barra final); el resto se
+// descarta con un aviso en el log.
 const PROD_ORIGINS = ['https://pdfcadabra.com', 'https://www.pdfcadabra.com'];
 const DEV_ORIGINS = ['http://localhost:3000', 'http://localhost:5173'];
-const ALLOWED_ORIGINS =
-    process.env.NODE_ENV === 'production' ? PROD_ORIGINS : [...PROD_ORIGINS, ...DEV_ORIGINS];
+const ORIGIN_RE = /^https:\/\/[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+const buildAllowedOrigins = (env) => {
+    const extra = [];
+    for (const raw of String(env.EXTRA_ALLOWED_ORIGINS || '').split(',')) {
+        const origin = raw.trim();
+        if (!origin) continue;
+        if (ORIGIN_RE.test(origin)) extra.push(origin);
+        else console.warn(`EXTRA_ALLOWED_ORIGINS: se ignora "${origin}" (solo https://dominio, sin ruta ni barra final).`);
+    }
+    const base = env.NODE_ENV === 'production' ? PROD_ORIGINS : [...PROD_ORIGINS, ...DEV_ORIGINS];
+    return [...new Set([...base, ...extra])];
+};
+const ALLOWED_ORIGINS = buildAllowedOrigins(process.env);
 
 app.use(cors({
     origin: (origin, callback) => {
@@ -562,3 +576,4 @@ module.exports = app;
 // Para medir en local con el mismo comando de Ghostscript que el servidor.
 module.exports.compressArgs = compressArgs;
 module.exports.COMPRESS_LEVELS = COMPRESS_LEVELS;
+module.exports.buildAllowedOrigins = buildAllowedOrigins;

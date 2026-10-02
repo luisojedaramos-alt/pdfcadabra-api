@@ -18,6 +18,9 @@ services:
       # CORS solo de pdfcadabra.com y www; sin esto también acepta localhost:3000 y :5173
       # (ver ALLOWED_ORIGINS en server.js).
       NODE_ENV: production
+      # Orígenes extra (https exactos, separados por comas). El branch deploy de dev, para la
+      # QA de Comprimir y Anonimizar contra este servidor; vaciarlo si deja de hacer falta.
+      EXTRA_ALLOWED_ORIGINS: https://dev--pdfcadabra.netlify.app
       PORT: "3000"
       # Ghostscript y PyMuPDF usan un núcleo cada uno: 3 procesos pesados a la vez y un
       # núcleo libre para Node, Caddy y el sistema.

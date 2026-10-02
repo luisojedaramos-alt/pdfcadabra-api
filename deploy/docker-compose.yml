@@ -13,10 +13,11 @@ services:
       dockerfile: Dockerfile
     image: pdfcadabra-api:local
     restart: unless-stopped
-    # Sin NODE_ENV, igual que en Render (que no define ninguna variable): el CORS acepta
-    # pdfcadabra.com, www y, además, localhost:3000 y :5173 (ver ALLOWED_ORIGINS en server.js).
     # Los tiempos máximos (cola 90 s, Comprimir 90 s, Anonimizar 180 s) son los del código.
     environment:
+      # CORS solo de pdfcadabra.com y www; sin esto también acepta localhost:3000 y :5173
+      # (ver ALLOWED_ORIGINS en server.js).
+      NODE_ENV: production
       PORT: "3000"
       # Ghostscript y PyMuPDF usan un núcleo cada uno: 3 procesos pesados a la vez y un
       # núcleo libre para Node, Caddy y el sistema.

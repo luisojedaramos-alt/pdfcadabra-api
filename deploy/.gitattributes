@@ -1,0 +1,2 @@
+# Se ejecutan o se leen en Linux: siempre LF, también al hacer checkout en Windows.
+* text eol=lf

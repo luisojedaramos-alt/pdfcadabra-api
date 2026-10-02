@@ -1,0 +1,18 @@
+# HTTPS automático (Let's Encrypt) para la API. Sin directiva `log`: Caddy no escribe log
+# de accesos (ni IPs, ni rutas, ni cabeceras); solo sus propios eventos (certificados).
+{
+	# Solo HTTP/1.1 y HTTP/2: ufw no abre 443/UDP (HTTP/3).
+	servers {
+		protocols h1 h2
+	}
+}
+
+api.pdfcadabra.com {
+	# Algo por encima de los 100 MB de multer, para que el 413 lo dé la API (en JSON y con
+	# cabeceras CORS) y no Caddy.
+	request_body {
+		max_size 110MB
+	}
+	header -Server
+	reverse_proxy api:3000
+}

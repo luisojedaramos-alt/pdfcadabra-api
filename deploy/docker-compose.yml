@@ -1,0 +1,65 @@
+# pdfcadabra-api en un VPS propio: la API (misma imagen que en Render, construida con el
+# Dockerfile del repo) detrás de Caddy, que pone el HTTPS de api.pdfcadabra.com.
+#
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# Cifras para 4 vCPU y 8 GB de RAM.
+name: pdfcadabra
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: pdfcadabra-api:local
+    restart: unless-stopped
+    # Sin NODE_ENV, igual que en Render (que no define ninguna variable): el CORS acepta
+    # pdfcadabra.com, www y, además, localhost:3000 y :5173 (ver ALLOWED_ORIGINS en server.js).
+    # Los tiempos máximos (cola 90 s, Comprimir 90 s, Anonimizar 180 s) son los del código.
+    environment:
+      PORT: "3000"
+      # Ghostscript y PyMuPDF usan un núcleo cada uno: 3 procesos pesados a la vez y un
+      # núcleo libre para Node, Caddy y el sistema.
+      HEAVY_MAX_CONCURRENT: "3"
+      HEAVY_MAX_QUEUE: "8"
+    # Subidas, intermedios y temporales de Ghostscript (todo va a /tmp/pdfcadabra-uploads)
+    # en RAM: nunca tocan el disco y desaparecen al reiniciar. Cuenta dentro de mem_limit.
+    tmpfs:
+      - /tmp:size=3g,mode=1777
+    mem_limit: 6g
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+    expose:
+      - "3000" # solo en la red interna de compose; no se publica en el host
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: journald
+      options:
+        tag: pdfcadabra-api
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: journald
+      options:
+        tag: pdfcadabra-caddy
+
+volumes:
+  caddy_data:
+  caddy_config:

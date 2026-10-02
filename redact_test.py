@@ -220,21 +220,27 @@ class VerificacionFinal(unittest.TestCase):
         self.assertEqual(redact.verify_redaction(path, {0: [fitz.Rect(0, 0, 1, 1)]}, {TERM}), [])
 
 
-class TextoOculto(unittest.TestCase):
-    def test_capa_invisible_no_cuenta_como_texto_perdido(self):
-        """scrub(hidden_text=True) quita una capa invisible (como la de un OCR): no es una
-        pérdida que haya que avisar, y lo visible fuera de la zona se conserva."""
+class CapaOcr(unittest.TestCase):
+    def test_bajo_la_zona_desaparece_y_el_resto_sigue_buscable(self):
+        """Escaneo con capa OCR invisible (render mode 3): el término bajo la zona se borra
+        también de la capa, y el resto de la capa se conserva y se puede buscar."""
         src, out = tmp_path(self, "in.pdf"), tmp_path(self, "out.pdf")
         doc = fitz.open()
         page = doc.new_page()
-        page.insert_text((60, 60), f"Visible {TERM} conservado", fontsize=12)
-        page.insert_text((60, 400), "capa invisible de OCR", fontsize=12, render_mode=3)
+        page.insert_text((60, 60), f"Expediente {TERM} del juicio ordinario 123/2026", fontsize=12, render_mode=3)
+        page.insert_text((60, 90), "Resolución del índice, España, pingüino", fontsize=12, render_mode=3)
         doc.save(src)
         doc.close()
-        report = redact.apply(src, out, search_items(src, TERM))
+        items = search_items(src, TERM)
+        self.assertEqual(len(items), 1)
+        report = redact.apply(src, out, items)
         self.assertTrue(report["verified"], report)
         self.assertEqual(report["text_loss_pages"], [])
-        self.assertEqual(words(out), ["Visible", "conservado"])
+        self.assertNotIn(TERM, all_text(out).casefold())
+        doc = fitz.open(out)
+        for word in ("Expediente", "123/2026", "pingüino"):
+            self.assertTrue(doc[0].search_for(word), f"{word} debe seguir en la capa OCR")
+        doc.close()
 
 
 class Fallo2OperadorComillaArchivo7(unittest.TestCase):

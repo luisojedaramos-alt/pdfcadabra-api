@@ -251,25 +251,6 @@ def norm(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _is_hidden_span(span):
-    """Mismo criterio que doc.scrub(hidden_text=True) en PyMuPDF 1.28.2."""
-    font = span.get("font")
-    if isinstance(font, str) and font.split("+")[-1] == "GlyphLessFont":
-        return True
-    if span.get("alpha") == 0:
-        return True
-    flags = span.get("char_flags")
-    filled = getattr(fitz.mupdf, "FZ_STEXT_FILLED", None)
-    stroked = getattr(fitz.mupdf, "FZ_STEXT_STROKED", None)
-    if isinstance(flags, int) and isinstance(filled, int) and isinstance(stroked, int):
-        if not (flags & filled) and not (flags & stroked):
-            return True
-    return False
-
-
-_TEXT_FLAGS = fitz.TEXT_PRESERVE_SPANS | fitz.TEXT_COLLECT_STYLES
-
-
 class ZoneIndex:
     """Zonas de una página ordenadas por y0, para no comparar cada palabra con todas."""
 
@@ -294,31 +275,13 @@ class ZoneIndex:
         return [z for z in self.candidates(y, y) if z.x0 <= x <= z.x1]
 
 
-def page_words(page, detect_hidden=True):
-    """Palabras de la página como [(texto, Rect, oculta)].
+def page_words(page):
+    """Palabras de la página como [(texto, Rect)], de get_text("words") (en C, rápido).
 
-    Las palabras salen de get_text("words") (en C, rápido). Con detect_hidden, "oculta" se
-    decide con los spans de get_text("dict") sobre el mismo textpage: una palabra es oculta
-    si su centro cae en un span oculto. Sin él (la salida, de la que scrub ya quitó el
-    texto oculto) se ahorra el "dict".
+    Incluye el texto invisible (la capa de un OCR): scrub se llama con hidden_text=False,
+    así que también debe conservarse fuera de las zonas.
     """
-    tp = page.get_textpage(flags=_TEXT_FLAGS) if detect_hidden else page.get_textpage()
-    hidden = None
-    if detect_hidden:
-        boxes = []
-        for block in page.get_text("dict", textpage=tp).get("blocks", ()):
-            if block.get("type") != 0:
-                continue
-            for line in block.get("lines", ()):
-                for span in line.get("spans", ()):
-                    if _is_hidden_span(span):
-                        boxes.append(fitz.Rect(span["bbox"]))
-        hidden = ZoneIndex(boxes) if boxes else None
-    words = []
-    for x0, y0, x1, y1, text, *_ in page.get_text("words", textpage=tp):
-        oculta = bool(hidden and hidden.containing_point((x0 + x1) / 2, (y0 + y1) / 2))
-        words.append((text, fitz.Rect(x0, y0, x1, y1), oculta))
-    return words
+    return [(text, fitz.Rect(x0, y0, x1, y1)) for x0, y0, x1, y1, text, *_ in page.get_text("words")]
 
 
 def chars_in_zones(page, zones):
@@ -330,7 +293,7 @@ def chars_in_zones(page, zones):
     if not zones:
         return False
     index = ZoneIndex(zones)
-    if not any(index.touches(r) for _, r, _ in page_words(page, detect_hidden=False)):
+    if not any(index.touches(r) for _, r in page_words(page)):
         return False
     for block in page.get_text("rawdict").get("blocks", ()):
         if block.get("type") != 0:
@@ -350,16 +313,16 @@ def text_under_zones(words, zones):
     """Texto bajo cada zona (palabras con el centro dentro), una cadena por zona."""
     index = ZoneIndex(zones)
     by_zone = {}
-    for w, r, _ in words:
+    for w, r in words:
         for z in index.containing_point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2):
             by_zone.setdefault(id(z), []).append(w)
     return [" ".join(ws) for ws in by_zone.values()]
 
 
-def visible_words_outside(words, zones, margin=1.0):
-    """Palabras visibles que no tocan ninguna zona: deben sobrevivir a la censura."""
+def words_outside(words, zones, margin=1.0):
+    """Palabras que no tocan ninguna zona: deben sobrevivir a la censura."""
     index = ZoneIndex(zones, margin)
-    return Counter(w for w, r, hidden in words if not hidden and not index.touches(r))
+    return Counter(w for w, r in words if not index.touches(r))
 
 
 # ==========================================
@@ -456,16 +419,14 @@ def verify_redaction(path, zones_by_page, terms):
 
 
 def text_loss_pages(path, zones_by_page, words_before):
-    """Páginas (desde 1) que han perdido texto visible fuera de las zonas censuradas."""
+    """Páginas (desde 1) que han perdido texto (visible u OCR) fuera de las zonas censuradas."""
     doc = fitz.open(path)
     try:
         return [
             page.number + 1
             for page in doc
             if words_before.get(page.number, Counter())
-            - visible_words_outside(
-                page_words(page, detect_hidden=False), zones_by_page.get(page.number, [])
-            )
+            - words_outside(page_words(page), zones_by_page.get(page.number, []))
         ]
     finally:
         doc.close()
@@ -610,7 +571,7 @@ def apply(input_path, output_path, items):
             t = norm(s)
             if len(t) >= MIN_TERM_LEN:
                 terms.add(t)
-        words_before[page.number] = visible_words_outside(words, zones)
+        words_before[page.number] = words_outside(words, zones)
 
     for page in doc:
         if page.number in zones_by_page:
@@ -622,13 +583,16 @@ def apply(input_path, output_path, items):
     doc = compact_xref(doc)
 
     # Limpieza forense. Todo a True salvo:
+    # - hidden_text: conserva la capa de texto invisible de un OCR (si no, un expediente
+    #   escaneado deja de poder buscarse). Lo que hay bajo las zonas ya lo ha borrado
+    #   apply_redactions (también el texto invisible) y lo comprueba verify_redaction.
     # - redactions: ya aplicadas arriba, con PDF_REDACT_IMAGE_PIXELS.
-    # - redact_images: solo afecta a las censuras que aplica scrub (las del texto oculto).
+    # - redact_images: no se pasa; solo afectaría a las censuras que aplicase scrub.
     doc.scrub(
         attached_files=True,
         clean_pages=True,
         embedded_files=True,
-        hidden_text=True,
+        hidden_text=False,
         javascript=True,
         metadata=True,
         redactions=False,

@@ -61,7 +61,9 @@
   `REDACT_NOT_VERIFIED` sin enviar nada (también si falta el informe). En el texto de
   página se mira la geometría y no el término: el usuario puede desmarcar una aparición.
   Al log solo van los sitios (`form_fields`, `outline`...), nunca los términos.
-- Texto conservado: se comparan las palabras visibles fuera de las zonas antes y después;
+- `scrub(hidden_text=False)`: se conserva la capa de texto invisible de un OCR (si no, un
+  escaneo deja de poder buscarse); bajo las zonas la borra `apply_redactions`.
+- Texto conservado: se comparan las palabras (también las de la capa OCR) fuera de las zonas antes y después;
   si falta alguna, se entrega igual pero con `X-Redact-Text-Loss: [páginas]` y el
   frontend lo avisa en el panel final.
 - Tests: `python -m unittest redact_test.py` (PyMuPDF real, PDFs sintéticos) y

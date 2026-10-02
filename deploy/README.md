@@ -24,15 +24,20 @@ La imagen se construye con el mismo `Dockerfile` del repo; Caddy pone el HTTPS d
 
 ## Primera instalación
 
-Desde el PC, con la entrada `pdfcadabra-clouding` de `~/.ssh/config`:
+Desde el PC, como root (solo hasta `ssh-lockdown.sh`; después root ya no entra). Antes,
+esperar a que acabe la instalación inicial de la imagen: `cloud-init status --wait`.
 
 ```sh
-scp -r deploy pdfcadabra-clouding:/root/deploy
-ssh pdfcadabra-clouding 'bash /root/deploy/setup.sh'
-# En otra terminal, SIN cerrar la de root: entrar con el usuario nuevo
-ssh -i ~/.ssh/pdfcadabra_clouding_rsa pdfcadabra@<IP> 'sudo -n true && docker ps'
-ssh pdfcadabra-clouding 'bash /root/deploy/ssh-lockdown.sh'   # y cambiar User en ~/.ssh/config
+KEY=~/.ssh/pdfcadabra_clouding_rsa
+scp -i $KEY -r deploy root@<IP>:/root/deploy
+ssh -i $KEY root@<IP> 'bash /root/deploy/setup.sh'
+# Entrar con el usuario nuevo ANTES de bloquear root
+ssh -i $KEY pdfcadabra@<IP> 'sudo -n true && docker ps'
+ssh -i $KEY root@<IP> 'bash /root/deploy/ssh-lockdown.sh && rm -rf /root/deploy'
 ```
+
+Después, la entrada `pdfcadabra-clouding` de `~/.ssh/config` (HostName, `User pdfcadabra`,
+IdentityFile, `IdentitiesOnly yes`) es la que usan los comandos de abajo.
 
 ## Desplegar una versión
 

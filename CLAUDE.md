@@ -43,6 +43,30 @@
   corre antes que las rutas, y multer borra el parcial de `pdfcadabra-uploads`
   él mismo antes de llamar al handler (verificado en local con 101 MB).
 
+# Anonimizar (redact.py)
+
+- Orden de `apply`: (1) reescribe los operadores `'` y `"` como `T* … Tj` en contenidos
+  de página y Form XObjects; (2) aplana campos y anotaciones (`doc.bake`) y quita el
+  `/AcroForm`; (3) censura con `PDF_REDACT_IMAGE_PIXELS`; (4) quita los marcadores que
+  contienen un término; (5) `doc.scrub()`; (6) guarda y vuelve a buscar en la salida.
+- (1) esquiva un fallo de MuPDF 1.28.2 (la última versión de PyMuPDF a 2026-10-02): su
+  filtro de contenido (`apply_redactions`, `clean_contents`, `scrub` y `save(clean=True)`)
+  convierte `14 TL 60 780 Td (x) '` en `60 780 TD T* (x)Tj` y saca todo el texto de la
+  página. Al actualizar PyMuPDF, comprobar si sigue haciendo falta con `redact_test.py`.
+- (2) va también en `search`, para que los valores de los campos salgan como hallazgos
+  en el mismo sitio en que se ven.
+- Verificación final (6): si un término censurado sigue en campos, anotaciones, enlaces,
+  metadatos (Info y XMP), marcadores o adjuntos, o queda algún carácter dentro de una
+  zona censurada, redact.py borra la salida y `server.js` responde 422
+  `REDACT_NOT_VERIFIED` sin enviar nada (también si falta el informe). En el texto de
+  página se mira la geometría y no el término: el usuario puede desmarcar una aparición.
+  Al log solo van los sitios (`form_fields`, `outline`...), nunca los términos.
+- Texto conservado: se comparan las palabras visibles fuera de las zonas antes y después;
+  si falta alguna, se entrega igual pero con `X-Redact-Text-Loss: [páginas]` y el
+  frontend lo avisa en el panel final.
+- Tests: `python -m unittest redact_test.py` (PyMuPDF real, PDFs sintéticos) y
+  `redact-verify.test.js` (ruta con redact.py simulado, dentro de `npm test`).
+
 # Pendientes
 
 - Trixie trae el paquete `jbig2` (jbig2enc), que bookworm no tenía, por si se

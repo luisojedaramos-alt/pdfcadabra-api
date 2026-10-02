@@ -49,7 +49,7 @@ app.use(cors({
             callback(null, false);
         }
     },
-    exposedHeaders: ['X-Redact-Warnings', 'X-Compress-Status', 'X-Compress-Level']
+    exposedHeaders: ['X-Redact-Warnings', 'X-Redact-Text-Loss', 'X-Compress-Status', 'X-Compress-Level']
 }));
 
 // Health check de Render: responde al instante, antes de los parsers de body y de
@@ -312,8 +312,21 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
                 console.error("No se pudo leer el reporte de fallos parciales:", describeError(e));
             }
 
-            const failed = (report && report.failed) || [];
-            const applied = report ? report.applied : 0;
+            // CRÍTICO: redact.py vuelve a buscar en el PDF censurado (texto de página, campos,
+            // anotaciones, metadatos, XMP, marcadores y adjuntos). Sin informe o sin
+            // verified === true no se envía nada: un fallo aquí nunca entrega el documento.
+            if (!report || report.verified !== true) {
+                const leaks = (report && Array.isArray(report.leaks)) ? report.leaks.join(', ') : 'sin informe';
+                console.error(`[Redact] Verificación final fallida (${leaks}): no se envía el documento.`);
+                secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
+                return res.status(422).json({
+                    code: 'REDACT_NOT_VERIFIED',
+                    error: 'No hemos podido garantizar la censura de este documento; no se ha descargado nada.'
+                });
+            }
+
+            const failed = report.failed || [];
+            const applied = report.applied || 0;
             const totalRequested = applied + failed.length;
 
             // CRÍTICO: si se pidieron censuras y NINGUNA se aplicó, el PDF de salida
@@ -331,6 +344,14 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
             if (failed.length > 0) {
                 console.warn(`[Redact] ${failed.length} censuras no se pudieron aplicar:`, failedMessages(failed));
                 res.setHeader('X-Redact-Warnings', encodeURIComponent(JSON.stringify(failed)));
+            }
+
+            // Páginas (desde 1) que han perdido texto fuera de las zonas censuradas: el
+            // documento se entrega, pero el frontend lo avisa en el panel final.
+            const textLoss = Array.isArray(report.text_loss_pages) ? report.text_loss_pages : [];
+            if (textLoss.length > 0) {
+                console.warn(`[Redact] Texto perdido fuera de las zonas censuradas en ${textLoss.length} página(s).`);
+                res.setHeader('X-Redact-Text-Loss', JSON.stringify(textLoss));
             }
 
             // Envío del resultado y borrado de los temporales al terminar el envío (con

@@ -128,3 +128,14 @@ test('caso b) solo propietario: /v1/redact/apply censura y entrega', { skip }, a
     assert.equal(res.status, 200);
     assert.equal(pageCount(body), 3);
 });
+
+test('Comprimir nunca entrega menos páginas: si gs pierde páginas, devuelve el original', { skip }, async (t) => {
+    gsOverride = path.join(DIR, 'una.pdf');
+    t.after(() => { gsOverride = null; });
+    for (const level of ['extreme', 'recommended', 'low']) {
+        const { res, body, input } = await post(t, '/v1/compress', 'plain.pdf', { level });
+        assert.equal(res.status, 200, level);
+        assert.equal(res.headers.get('x-compress-status'), 'already-optimized', level);
+        assert.ok(body.equals(input), `${level}: debe ser el original sin tocar`);
+    }
+});

@@ -14,6 +14,11 @@ let gsMode = 'ok';
 const gsCalls = [];
 
 childProcess.execFile = (command, args, options, callback) => {
+    // pdf_check.py verify (comprobación del resultado antes de entregarlo): todo bien.
+    if (args[0] === 'pdf_check.py') {
+        setImmediate(() => callback(null, '', ''));
+        return {};
+    }
     if (args[0] === 'lossless_images.py') {
         // protect: sin imágenes que proteger (no escribe salida).
         setImmediate(() => callback(null, '0\n', ''));

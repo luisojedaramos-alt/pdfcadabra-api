@@ -19,6 +19,11 @@ const calls = [];
 
 childProcess.execFile = (command, args, options, callback) => {
     calls.push({ command, args, options });
+    // pdf_check.py verify (comprobación del resultado antes de entregarlo): todo bien.
+    if (args[0] === 'pdf_check.py') {
+        setImmediate(() => callback(null, '', ''));
+        return {};
+    }
     if (args[0] === 'lossless_images.py') {
         if (protectedCount > 0) fs.copyFileSync(args[2], args[3]);
         setImmediate(() => callback(null, `${protectedCount}

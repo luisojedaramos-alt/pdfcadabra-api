@@ -116,6 +116,12 @@
 - Caso b), solo contraseña de propietario (habitual en sedes judiciales): PyMuPDF lo abre con
   la contraseña vacía y se procesa como cualquier otro; la salida va sin cifrar.
 - El frontend ya los rechaza en el navegador antes de subirlos; el 422 es la red de seguridad.
+- Red de seguridad de Comprimir: antes de entregar cualquier resultado (de cualquier nivel o de
+  la red de seguridad del nivel low), `pdf_check.py verify <entrada> <salida>` comprueba que se
+  abre sin errores, que tiene las mismas páginas que la entrada y que ninguna página con
+  contenido (texto o imágenes) ha quedado vacía. Si no, se devuelve el original sin tocar
+  (`X-Compress-Status: already-optimized`) y el motivo va al log. Tope propio:
+  `VERIFY_TIMEOUT_MS` (30 s), fuera del de la compresión.
 - Tests: `python -m unittest pdf_check_test.py` y `pdf-encrypted.test.js` (servidor real con
   python3, PyMuPDF y gs; se salta si faltan; en Windows `PYTHON=python` y `GS=<gswin64c.exe>`).
 

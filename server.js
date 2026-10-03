@@ -154,6 +154,9 @@ const HEAVY_EXEC_TIMEOUT_MS = envInt('HEAVY_EXEC_TIMEOUT_MS', 180000);
 // gs + 0,4 s de jpeg_flate.py. 90 s dejan margen para escaneos reales con muchas más
 // páginas: gs escala con páginas y píxeles, no con MB.
 const COMPRESS_TOTAL_TIMEOUT_MS = envInt('COMPRESS_TOTAL_TIMEOUT_MS', 90000);
+// Tope de pdf_check.py verify, la comprobación del resultado antes de entregarlo (abre las dos
+// versiones y mira el texto y las imágenes de cada página: segundos incluso con cientos).
+const VERIFY_TIMEOUT_MS = envInt('VERIFY_TIMEOUT_MS', 30000);
 const RETRY_AFTER_SECONDS = 10;
 const heavyLimiter = createLimiter({
     maxConcurrent: Math.max(1, envInt('HEAVY_MAX_CONCURRENT', 1)),
@@ -217,7 +220,7 @@ const runHeavy = (req, command, args, callback, { keepSlot = false, timeoutMs = 
 // Proceso matado por su timeout (runHeavy lo lanza con killSignal SIGKILL).
 const isExecTimeout = (error) => error.killed && error.signal === 'SIGKILL';
 
-// PDF con contraseña de apertura: lossless_images.py y redact.py salen con este
+// PDF con contraseña de apertura: lossless_images.py, redact.py y pdf_check.py salen con este
 // código (pdf_check.EXIT_ENCRYPTED) sin procesar nada. Los de solo contraseña de propietario se
 // abren con la contraseña vacía y se procesan como cualquier otro.
 const EXIT_ENCRYPTED = 3;
@@ -586,12 +589,31 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
         }
     }
 
+    // Red de seguridad antes de entregar cualquier resultado: pdf_check.py comprueba que se abre
+    // sin errores, que tiene las mismas páginas que la entrada y que ninguna página con contenido
+    // ha quedado vacía. Si no, se devuelve el original sin tocar: un documento vacío o
+    // incompleto nunca sale del servidor. Tiene su propio tope (no cuenta contra el de la
+    // compresión: el resultado ya existe y solo falta comprobarlo).
+    function verifiedSend(resultPath, appliedLevel) {
+        try {
+            runHeavy(req, 'python3', ['pdf_check.py', 'verify', inputPath, resultPath], (error, stdout, stderr) => {
+                if (!error) return send(resultPath, appliedLevel);
+                if (isEncryptedExit(error)) return fail({ error });
+                logProcessError('[Compress] Resultado no válido; se devuelve el original:', error, stderr);
+                send(null);
+            }, { keepSlot: true, timeoutMs: VERIFY_TIMEOUT_MS });
+        } catch (e) {
+            console.error('Error lanzando la comprobación del resultado:', describeError(e));
+            send(null);
+        }
+    }
+
     function compressAll() {
         runPass(COMPRESS_LEVELS[level], primaryPaths, (err, resultPath) => {
             if (err) return fail(err);
             const ok = savesEnough(resultPath);
             if (ok === null) return statFailed();
-            if (ok) return send(resultPath, level);
+            if (ok) return verifiedSend(resultPath, level);
             // Red de seguridad: si recomendada o extrema no reducen, se intenta con la lógica
             // de low (reescritura, fuentes y deduplicación, sin tocar imágenes) dentro del
             // mismo tope antes de devolver el original.
@@ -609,7 +631,8 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
                 }
                 const fallbackOk = savesEnough(fallbackPath);
                 if (fallbackOk === null) return statFailed();
-                send(fallbackOk ? fallbackPath : null, 'low');
+                if (fallbackOk) return verifiedSend(fallbackPath, 'low');
+                send(null);
             });
         });
     }

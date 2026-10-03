@@ -1,4 +1,4 @@
-"""Tests de lossless_images.py (y de su uso en Comprimir) con PDFs sintéticos.
+"""Tests de lossless_images.py (y de su uso en Comprimir y Anonimizar) con PDFs sintéticos.
 
 Uso: python -m unittest lossless_images_test.py
 
@@ -22,6 +22,7 @@ import pymupdf
 
 import jpeg_flate
 import lossless_images as li
+import redact
 
 try:  # dependencias solo de tests (requirements-test.txt)
     import zxingcpp
@@ -317,6 +318,63 @@ class ComprimirConGhostscript(unittest.TestCase):
                     continue
                 with self.subTest(level=level, image=name):
                     self.assertIn(QR_TEXT if name.startswith("qr") else BAR_TEXT, decode_page(out, page_no))
+
+
+class AnonimizarIndexed(unittest.TestCase):
+    """recompress_redacted_images: un QR o sello (pocos colores) nunca pasa a JPEG, aunque
+    se empareje con una foto JPEG del mismo tamaño."""
+
+    def make(self, path, photo_first, draw_photo_first):
+        doc = pymupdf.open()
+        page = doc.new_page(width=595, height=842)
+        bits = code_bits("qr", 3)
+        w, h = len(bits[0]), len(bits)
+        qr = doc.get_new_xref()
+        doc.update_object(qr, f"<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /BitsPerComponent 8 "
+                              "/ColorSpace [/Indexed /DeviceRGB 1 <000000FFFFFF>] >>")
+        doc.update_stream(qr, bytes(1 if v else 0 for row in bits for v in row))
+        photo = doc.get_new_xref()
+        doc.update_object(photo, f"<< /Type /XObject /Subtype /Image /Width {w} /Height {h} "
+                                 "/BitsPerComponent 8 /ColorSpace /DeviceRGB >>")
+        doc.update_stream(photo, photo_jpeg(w, h), compress=False)
+        doc.xref_set_key(photo, "Filter", "/DCTDecode")
+        page.insert_text((0, 0), " ")
+        # El orden de los recursos y del dibujo cambia el orden en que se emparejan.
+        a, b = (photo, qr) if photo_first else (qr, photo)
+        doc.xref_set_key(page.xref, "Resources", f"<< /XObject << /A {a} 0 R /B {b} 0 R >> >>")
+        p, q = ("A", "B") if photo_first else ("B", "A")
+        draw = (f"q 200 0 0 200 300 600 cm /{p} Do Q q 200 0 0 200 40 600 cm /{q} Do Q" if draw_photo_first
+                else f"q 200 0 0 200 40 600 cm /{q} Do Q q 200 0 0 200 300 600 cm /{p} Do Q").encode()
+        doc.update_stream(page.get_contents()[0], draw)
+        doc.save(path)
+        return w, h
+
+    def test_qr_indexed_sigue_sin_perdida(self):
+        # Con el orden de los recursos distinto del de dibujo, el QR salía en JPEG.
+        for photo_first in (False, True):
+            for draw_photo_first in (False, True):
+                with self.subTest(photo_first=photo_first, draw_photo_first=draw_photo_first):
+                    self.check(photo_first, draw_photo_first)
+
+    def check(self, photo_first, draw_photo_first):
+        d = tmp_dir(self)
+        src, out = os.path.join(d, "in.pdf"), os.path.join(d, "out.pdf")
+        self.make(src, photo_first, draw_photo_first)
+        # Una zona en cada imagen (esquina inferior derecha del QR: fuera del código).
+        items = [{"id": "a", "page": 0, "text": "Zona", "category": "Censura Manual", "rect": [236, 238, 239, 241]},
+                 {"id": "b", "page": 0, "text": "Zona", "category": "Censura Manual", "rect": [350, 100, 380, 130]}]
+        report = redact.apply(src, out, items)
+        self.assertTrue(report["verified"], report)
+        doc = pymupdf.open(out)
+        for im in doc[0].get_images(full=True):
+            x0 = doc[0].get_image_rects(im[0])[0].x0
+            # La foto (x = 300) sigue en JPEG; el QR (x = 40), sin pérdida.
+            self.assertEqual("DCT" in doc.xref_get_key(im[0], "Filter")[1], x0 > 200, x0)
+        if zxingcpp is not None:
+            clip = pymupdf.Rect(40, 42, 240, 242)
+            pix = doc[0].get_pixmap(dpi=300, clip=clip, colorspace=pymupdf.csGRAY)
+            texts = {r.text for r in zxingcpp.read_barcodes(Image.frombytes("L", (pix.width, pix.height), pix.samples))}
+            self.assertIn(QR_TEXT, texts)
 
 
 if __name__ == "__main__":

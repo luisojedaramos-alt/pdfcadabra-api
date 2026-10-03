@@ -345,6 +345,8 @@ _STD_LUMA_SUM = sum((
     49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
 ))
 DEFAULT_JPEG_QUALITY = 85
+# Con estos colores o menos, una imagen censurada nunca pasa a JPEG.
+MAX_LOSSLESS_COLORS = 16
 
 
 def jpeg_quality(data):
@@ -376,17 +378,34 @@ def jpeg_quality(data):
     return None
 
 
+def _image_places(page, xrefs):
+    """{xref: posiciones redondeadas} de esas imágenes en la página.
+
+    Por la huella MD5 de los píxeles, como get_image_rects, pero con un TextPage nuevo:
+    get_image_info/get_image_rects guardan en caché las imágenes de antes de censurar.
+    Decodifica cada imagen: solo se usa cuando hay varias del mismo tamaño.
+    """
+    by_digest = {}
+    for info in page.get_textpage(flags=fitz.TEXT_PRESERVE_IMAGES).extractIMGINFO(hashes=True):
+        by_digest.setdefault(info["digest"], []).append(tuple(round(v) for v in info["bbox"]))
+    return {x: tuple(sorted(by_digest.get(fitz.Pixmap(page.parent, x).digest, []))) for x in xrefs}
+
+
 def _image_slots(page):
-    """Imágenes de la página: [(xref, ancho, alto, bits por componente, /Filter)].
+    """Imágenes de la página: [(xref, ancho, alto, bits por componente, /Filter, posiciones)].
 
     El /Filter completo ("null" si no tiene, "[/FlateDecode/DCTDecode]"...): get_images solo
-    da el primer filtro de la cadena.
+    da el primer filtro de la cadena. Posiciones: dónde se dibuja (la copia que deja
+    apply_redactions va en el mismo sitio que su original), solo para las imágenes que
+    comparten ancho, alto y bits con otra; para el resto, ().
     """
     doc = page.parent
-    return [
-        (im[0], im[2], im[3], im[4], doc.xref_get_key(im[0], "Filter")[1])
-        for im in page.get_images(full=True)
-    ]
+    slots = [(im[0], im[2], im[3], im[4], doc.xref_get_key(im[0], "Filter")[1])
+             for im in page.get_images(full=True)]
+    sizes = Counter(s[1:4] for s in slots)
+    ambiguous = [s[0] for s in slots if sizes[s[1:4]] > 1]
+    places = _image_places(page, ambiguous) if ambiguous else {}
+    return [s + (places.get(s[0], ()),) for s in slots]
 
 
 def _encode_g4(doc, xref, width, height):
@@ -417,6 +436,10 @@ def _encode_jpeg(doc, xref, original_xref, original_filter):
     pix = fitz.Pixmap(doc, xref)
     if pix.alpha or pix.n not in (1, 3):
         return False  # CMYK u otros: se queda sin pérdida (Flate)
+    if pix.color_count() <= MAX_LOSSLESS_COLORS:
+        # Código de barras, QR o sello (o una Indexed que MuPDF ha pasado a RGB): sin pérdida,
+        # aunque se haya emparejado con un JPEG (como en Comprimir, lossless_images.py).
+        return False
     quality = None
     if "DCT" in original_filter:
         try:
@@ -452,15 +475,21 @@ def recompress_redacted_images(doc, page, before):
     before_xrefs = {b[0] for b in before}
     # La copia nueva cambia de xref y de nombre de recurso: se empareja con la imagen que ha
     # desaparecido de la página y tiene las mismas dimensiones y bits por componente (en un
-    # escaneo, el fondo en color y la máscara de texto suelen medir lo mismo).
+    # escaneo, el fondo en color y la máscara de texto suelen medir lo mismo) y, si hay
+    # varias, con la que se dibujaba en el mismo sitio: por orden, un QR podía emparejarse con
+    # la foto JPEG de al lado y salir en JPEG.
+    # (Si alguna no se encuentra por su sitio, después se empareja por orden, como antes.)
     replaced = [b for b in before if b[0] not in after_xrefs]
-    for xref, width, height, bits, filt in after:
-        if xref in before_xrefs or filt != "null":
-            continue  # sin cambios, o ya comprimida
-        match = next((b for b in replaced if b[1:4] == (width, height, bits)), None)
-        if match is None:
-            continue
-        replaced.remove(match)
+    copies = [a for a in after if a[0] not in before_xrefs and a[4] == "null"]  # nuevas, sin comprimir
+    pairs = []
+    for by_place in (True, False):
+        for copy in list(copies):
+            match = next((b for b in replaced if b[1:4] == copy[1:4] and (b[5] == copy[5] or not by_place)), None)
+            if match is not None:
+                replaced.remove(match)
+                copies.remove(copy)
+                pairs.append((copy, match))
+    for (xref, width, height, bits, _, _), match in pairs:
         original_xref, original_filter = match[0], match[4]
         bpc = doc.xref_get_key(xref, "BitsPerComponent")[1]
         try:

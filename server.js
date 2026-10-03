@@ -220,7 +220,7 @@ const runHeavy = (req, command, args, callback, { keepSlot = false, timeoutMs = 
 // Proceso matado por su timeout (runHeavy lo lanza con killSignal SIGKILL).
 const isExecTimeout = (error) => error.killed && error.signal === 'SIGKILL';
 
-// PDF con contraseña de apertura: lossless_images.py, redact.py y pdf_check.py salen con este
+// PDF con contraseña de apertura: lossless_images.py y redact.py salen con este
 // código (pdf_check.EXIT_ENCRYPTED) sin procesar nada. Los de solo contraseña de propietario se
 // abren con la contraseña vacía y se procesan como cualquier otro.
 const EXIT_ENCRYPTED = 3;
@@ -596,9 +596,10 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
     // compresión: el resultado ya existe y solo falta comprobarlo).
     function verifiedSend(resultPath, appliedLevel) {
         try {
+            // Cualquier fallo de verify (salida no válida, excepción, tope de tiempo o python que
+            // muere) acaba igual: el original sin tocar. Nunca un 500 ni la salida sin verificar.
             runHeavy(req, 'python3', ['pdf_check.py', 'verify', inputPath, resultPath], (error, stdout, stderr) => {
                 if (!error) return send(resultPath, appliedLevel);
-                if (isEncryptedExit(error)) return fail({ error });
                 logProcessError('[Compress] Resultado no válido; se devuelve el original:', error, stderr);
                 send(null);
             }, { keepSlot: true, timeoutMs: VERIFY_TIMEOUT_MS });

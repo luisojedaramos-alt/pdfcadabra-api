@@ -13,12 +13,15 @@ let gsSizes = {};
 // Imágenes que lossless_images.py dice haber protegido (con > 0 escribe la entrada de gs).
 let protectedCount = 0;
 const calls = [];
+// Error con el que termina pdf_check.py verify (null = la salida es válida).
+let verifyError = null;
 
 childProcess.execFile = (command, args, options, callback) => {
     calls.push({ command, args, options });
-    // pdf_check.py verify (comprobación del resultado antes de entregarlo): todo bien.
+    // pdf_check.py verify (comprobación del resultado antes de entregarlo): bien, o el fallo
+    // de verifyError.
     if (args[0] === 'pdf_check.py') {
-        setImmediate(() => callback(null, '', ''));
+        setImmediate(() => callback(verifyError, '', verifyError ? 'Traceback' : ''));
         return {};
     }
     if (args[0] === 'lossless_images.py') {
@@ -248,3 +251,23 @@ test('X-Compress-Level se expone por CORS', async (t) => {
     await res.arrayBuffer();
     assert.match(res.headers.get('access-control-expose-headers'), /X-Compress-Level/);
 });
+
+// Si verify falla por lo que sea, se entrega el original sin tocar: nunca un 500 ni la salida
+// sin verificar.
+for (const [name, error] of [
+    ['salida no válida (código 4)', Object.assign(new Error('código 4'), { code: 4 })],
+    ['python que muere (código 1)', Object.assign(new Error('código 1'), { code: 1 })],
+    ['código 3', Object.assign(new Error('código 3'), { code: 3 })],
+    ['tope de tiempo', Object.assign(new Error('killed'), { killed: true, signal: 'SIGKILL' })],
+]) {
+    test(`verify falla (${name}): se devuelve el original sin tocar`, async (t) => {
+        protectedCount = 0;
+        gsSizes = { '/ebook': 4000 };
+        verifyError = error;
+        t.after(() => { verifyError = null; });
+        const { res, body } = await compress(t, 'recommended');
+        assert.equal(res.status, 200);
+        assert.equal(res.headers.get('x-compress-status'), 'already-optimized');
+        assert.ok(body.equals(INPUT), 'el cuerpo es la entrada tal cual');
+    });
+}

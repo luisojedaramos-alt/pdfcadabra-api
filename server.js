@@ -379,11 +379,13 @@ const MIN_COMPRESS_SAVING = 0.02;
 // Niveles de compresión: preset de Ghostscript + resolución objetivo (ppp) de las
 // imágenes en color/gris y de las de blanco y negro (null = no se reducen) + calidad
 // JPEG con la que se recodifican las de color/gris (QFactor de Ghostscript; calibrado
-// con gs 10: QFactor = (100 − calidad IJG) / 50, así que 0,5 ≈ calidad 75 y 0,8 ≈ 60).
-// extreme: máximo ahorro · recommended: balance ideal LexNET · low: sin reducir nada
+// con gs 10: QFactor = (100 − calidad IJG) / 50, así que 0,7 ≈ calidad 65 y 0,8 ≈ 60).
+// Calibrado (2026-10) frente a iLovePDF con un escaneo real en gris de 51 páginas a 300 ppp:
+// su recomendada es 150 ppp y ~q60, su extrema 72 ppp y ~q65.
+// extreme: máximo ahorro · recommended: equilibrio entre peso y legibilidad · low: sin reducir
 const COMPRESS_LEVELS = {
-    extreme: { pdfSettings: '/screen', colorDpi: 110, monoDpi: 150, jpegQFactor: 0.8 },
-    recommended: { pdfSettings: '/ebook', colorDpi: 150, monoDpi: 200, jpegQFactor: 0.5 },
+    extreme: { pdfSettings: '/screen', colorDpi: 100, monoDpi: 150, jpegQFactor: 0.8 },
+    recommended: { pdfSettings: '/ebook', colorDpi: 150, monoDpi: 200, jpegQFactor: 0.7 },
     low: { pdfSettings: '/printer', colorDpi: null, monoDpi: null, jpegQFactor: null }
 };
 
@@ -397,7 +399,9 @@ const downsampleArgs = (kind, dpi, threshold) =>
 // comando exacto que usa el servidor.
 //
 // Color y gris (recomendada y extrema): umbral 1.0, así que se reduce todo lo que pase de
-// la resolución objetivo, y siempre a JPEG con la calidad del nivel. Sin forzar JPEG,
+// la resolución objetivo, y siempre a JPEG con la calidad del nivel. Método /Bicubic en todos
+// los niveles: los presets /screen, /ebook y /printer usan /Average (media de bloques), que
+// suaviza menos y deja más detalle fino (ruido del papel) que el JPEG paga en bytes. Sin forzar JPEG,
 // Ghostscript elegía Flate (sin pérdida) para muchas fotos: en un expediente unido de 155
 // páginas la salida pesaba un 61 % MÁS que la entrada, y codificar en Flate era además lo
 // más lento (130 s frente a 55 s con 0,5 CPU). PassThroughJPEGImages=false: los JPEG que no
@@ -414,6 +418,7 @@ const compressArgs = ({ pdfSettings, colorDpi, monoDpi, jpegQFactor }, inputPath
         '-sDEVICE=pdfwrite', '-dCompatibilityLevel=1.4', `-dPDFSETTINGS=${pdfSettings}`,
         ...downsampleArgs('Color', colorDpi, 1.0),
         ...downsampleArgs('Gray', colorDpi, 1.0),
+        '-dColorImageDownsampleType=/Bicubic', '-dGrayImageDownsampleType=/Bicubic',
         ...(jpeg ? [
             '-dAutoFilterColorImages=false', '-dColorImageFilter=/DCTEncode',
             '-dAutoFilterGrayImages=false', '-dGrayImageFilter=/DCTEncode',

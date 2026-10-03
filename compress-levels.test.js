@@ -54,28 +54,32 @@ const outputs = () => calls.flatMap((c) => (c.command === 'gs'
     ? [c.args.find((a) => a.startsWith('-sOutputFile=')).slice('-sOutputFile='.length)]
     : [c.args[2]]));
 
-test('recomendada: color y gris a 150 ppp en JPEG calidad ~75, B/N sin pérdida', () => {
+test('recomendada: color y gris a 150 ppp con Bicubic en JPEG calidad ~65, B/N sin pérdida', () => {
     const args = compressArgs(COMPRESS_LEVELS.recommended, 'in.pdf', 'out.pdf');
     for (const a of [
         '-dPDFSETTINGS=/ebook',
         '-dColorImageResolution=150', '-dColorImageDownsampleThreshold=1',
         '-dGrayImageResolution=150', '-dGrayImageDownsampleThreshold=1',
+        '-dColorImageDownsampleType=/Bicubic', '-dGrayImageDownsampleType=/Bicubic',
         '-dAutoFilterColorImages=false', '-dColorImageFilter=/DCTEncode',
         '-dAutoFilterGrayImages=false', '-dGrayImageFilter=/DCTEncode',
         '-dPassThroughJPEGImages=false',
         '-dMonoImageResolution=200', '-dMonoImageFilter=/CCITTFaxEncode', '-dMonoImageDownsampleType=/Subsample'
     ]) assert.ok(args.includes(a), `falta ${a}`);
     const ps = args[args.indexOf('-c') + 1];
-    assert.match(ps, /\/ColorImageDict << \/QFactor 0\.5 /);
-    assert.match(ps, /\/GrayImageDict << \/QFactor 0\.5 /);
+    assert.match(ps, /\/ColorImageDict << \/QFactor 0\.7 /);
+    assert.match(ps, /\/GrayImageDict << \/QFactor 0\.7 /);
     assert.deepEqual(args.slice(-2), ['-f', 'in.pdf'], 'la entrada va después de -f');
     assert.ok(!args.some((a) => /Mono.*DCT|JBIG2/i.test(a)), 'B/N nunca con pérdida');
 });
 
-test('extrema: 110 ppp, JPEG calidad ~60 (QFactor 0.8), B/N a 150 sin pérdida', () => {
+test('extrema: 100 ppp con Bicubic, JPEG calidad ~60 (QFactor 0.8), B/N a 150 sin pérdida', () => {
     const args = compressArgs(COMPRESS_LEVELS.extreme, 'in.pdf', 'out.pdf');
     assert.ok(args.includes('-dPDFSETTINGS=/screen'));
-    assert.ok(args.includes('-dColorImageResolution=110'));
+    assert.ok(args.includes('-dColorImageResolution=100'));
+    assert.ok(args.includes('-dGrayImageResolution=100'));
+    assert.ok(args.includes('-dColorImageDownsampleType=/Bicubic'));
+    assert.ok(args.includes('-dGrayImageDownsampleType=/Bicubic'));
     assert.ok(args.includes('-dMonoImageResolution=150'));
     assert.match(args[args.indexOf('-c') + 1], /\/QFactor 0\.8 /);
     assert.ok(args.includes('-dMonoImageFilter=/CCITTFaxEncode'));
@@ -85,6 +89,7 @@ test('baja: sin cambios (ni reducción ni JPEG forzado)', () => {
     const args = compressArgs(COMPRESS_LEVELS.low, 'in.pdf', 'out.pdf');
     assert.ok(args.includes('-dDownsampleColorImages=false'));
     assert.ok(args.includes('-dDownsampleMonoImages=false'));
+    assert.ok(args.includes('-dColorImageDownsampleType=/Bicubic'), 'Bicubic también en baja (no reduce, pero es uniforme)');
     assert.ok(!args.includes('-c'));
     assert.ok(!args.some((a) => a.includes('DCTEncode') || a.includes('PassThroughJPEG')));
     assert.equal(args.at(-1), 'in.pdf');

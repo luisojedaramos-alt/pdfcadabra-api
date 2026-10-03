@@ -322,5 +322,89 @@ class XrefConHuecos(unittest.TestCase):
         self.assertEqual(words(out), ["Expediente", "de", "prueba"])
 
 
+def make_scan_pdf(path, kind):
+    """Escaneo sintético de 2 páginas sin texto: JPEG en gris con ruido ("jpeg") o 1 bit
+    ("1bit", Flate) a pantalla completa."""
+    import random
+    rng = random.Random(7)
+    w, h = 1240, 1754
+    doc = fitz.open()
+    for _ in range(2):
+        page = doc.new_page(width=595, height=842)
+        if kind == "jpeg":
+            samples = bytes(200 + rng.randrange(40) for _ in range(w * h))
+            pix = fitz.Pixmap(fitz.csGRAY, w, h, samples, 0)
+            page.insert_image(page.rect, stream=pix.tobytes("jpg", jpg_quality=60))
+        else:
+            stride = (w + 7) // 8
+            rows = bytes(0xFF if (x // 40 + y // 40) % 2 else 0xF0 for y in range(h) for x in range(stride))
+            xref = doc.get_new_xref()
+            doc.update_object(xref, f"<< /Type /XObject /Subtype /Image /Width {w} /Height {h} "
+                                    "/ColorSpace /DeviceGray /BitsPerComponent 1 >>")
+            doc.update_stream(xref, rows)
+            page.insert_text((0, 0), " ")  # crea /Contents y /Resources
+            doc.xref_set_key(page.xref, "Resources", f"<< /XObject << /Scan {xref} 0 R >> >>")
+            doc.update_stream(page.get_contents()[0], b"q 595 0 0 842 0 0 cm /Scan Do Q")
+    doc.save(path)
+    doc.close()
+
+
+ZONE = [120, 140, 300, 165]
+
+
+def zone_items(n_pages):
+    return [{"id": str(i), "page": i, "text": "Zona manual", "category": "Censura Manual", "rect": ZONE}
+            for i in range(n_pages)]
+
+
+def image_info(path):
+    doc = fitz.open(path)
+    try:
+        return [(doc.xref_get_key(im[0], "Filter")[1], im[4]) for im in doc[0].get_images(full=True)]
+    finally:
+        doc.close()
+
+
+def zone_is_black(path):
+    doc = fitz.open(path)
+    try:
+        pix = doc[0].get_pixmap(dpi=72, clip=fitz.Rect(ZONE) + (4, 4, -4, -4), colorspace=fitz.csGRAY)
+        return max(pix.samples) < 30
+    finally:
+        doc.close()
+
+
+class TamanoDeSalida(unittest.TestCase):
+    """apply_redactions dejaba las imágenes tocadas sin comprimir: un escaneo JPEG se
+    multiplicaba por 3-5 y uno en CCITT pasaba a Flate."""
+
+    def test_escaneo_jpeg_sigue_en_jpeg_y_no_crece(self):
+        src, out = tmp_path(self, "in.pdf"), tmp_path(self, "out.pdf")
+        make_scan_pdf(src, "jpeg")
+        report = redact.apply(src, out, zone_items(2))
+        self.assertTrue(report["verified"])
+        self.assertLessEqual(os.path.getsize(out), os.path.getsize(src) * 1.1)
+        self.assertIn("DCTDecode", image_info(out)[0][0])
+        self.assertTrue(zone_is_black(out))
+
+    def test_escaneo_1bit_vuelve_a_ccitt_sin_perdida(self):
+        src, out = tmp_path(self, "in.pdf"), tmp_path(self, "out.pdf")
+        make_scan_pdf(src, "1bit")
+        report = redact.apply(src, out, zone_items(2))
+        self.assertTrue(report["verified"])
+        self.assertEqual(image_info(out)[0], ("/CCITTFaxDecode", 1))
+        self.assertTrue(zone_is_black(out))
+        # Fuera de la zona, los píxeles son los mismos (G4 no tiene pérdida).
+        a = fitz.open(src)[0].get_pixmap(dpi=72, clip=fitz.Rect(300, 400, 500, 600))
+        b = fitz.open(out)[0].get_pixmap(dpi=72, clip=fitz.Rect(300, 400, 500, 600))
+        self.assertEqual(a.samples, b.samples)
+
+    def test_calidad_jpeg_estimada(self):
+        pix = fitz.Pixmap(fitz.csGRAY, 64, 64, bytes(range(256)) * 16, 0)
+        for q in (40, 60, 85):
+            self.assertAlmostEqual(redact.jpeg_quality(pix.tobytes("jpg", jpg_quality=q)), q, delta=2)
+        self.assertIsNone(redact.jpeg_quality(b"no es un jpeg"))
+
+
 if __name__ == "__main__":
     unittest.main()

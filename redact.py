@@ -2,9 +2,11 @@ import bisect
 import json
 import os
 import re
+import struct
 import sys
 import unicodedata
 import uuid
+import zlib
 from collections import Counter
 
 import pymupdf as fitz
@@ -326,7 +328,157 @@ def words_outside(words, zones, margin=1.0):
 
 
 # ==========================================
-# 4. MARCADORES
+# 4. RECOMPRESIÓN DE LAS IMÁGENES CENSURADAS
+# ==========================================
+# apply_redactions(PDF_REDACT_IMAGE_PIXELS) sustituye cada imagen que toca una zona por una
+# copia nueva SIN comprimir (con save(deflate=True) acaba en Flate): un escaneo JPEG en gris
+# pasaba de 24 a 67 MB y uno en color se multiplicaba por 5. Aquí se vuelve a codificar cada
+# imagen sustituida como su original: JPEG (o JPEG 2000) en JPEG con la calidad estimada del
+# original, y 1 bit (CCITT, JBIG2...) en CCITT G4 sin pérdida. Los píxeles tapados ya son
+# negros en la copia, así que recomprimir no puede devolver nada de lo censurado.
+
+# Tabla de cuantización de luminancia de referencia (IJG, calidad 50).
+_STD_LUMA_SUM = sum((
+    16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55,
+    14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62,
+    18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92,
+    49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
+))
+DEFAULT_JPEG_QUALITY = 85
+
+
+def jpeg_quality(data):
+    """Calidad IJG aproximada (30-95) de un JPEG, por su tabla de luminancia; None si no hay."""
+    i = 2
+    try:
+        while i + 4 <= len(data) and data[i] == 0xFF:
+            marker = data[i + 1]
+            length = struct.unpack(">H", data[i + 2:i + 4])[0]
+            if marker == 0xDB:
+                seg = data[i + 4:i + 2 + length]
+                j = 0
+                while j < len(seg):
+                    precision, table = seg[j] >> 4, seg[j] & 15
+                    size = 128 if precision else 64
+                    values = seg[j + 1:j + 1 + size]
+                    if precision:
+                        values = struct.unpack(">64H", values)
+                    if table == 0:
+                        scale = sum(values) * 100 / _STD_LUMA_SUM
+                        q = (200 - scale) / 2 if scale <= 100 else 5000 / scale
+                        return max(30, min(95, round(q)))
+                    j += 1 + size
+            if marker == 0xDA:  # empiezan los datos: no hay más tablas
+                return None
+            i += 2 + length
+    except (struct.error, IndexError):
+        return None
+    return None
+
+
+def _image_slots(page):
+    """Imágenes de la página: [(xref, ancho, alto, bits por componente, /Filter)].
+
+    El /Filter completo ("null" si no tiene, "[/FlateDecode/DCTDecode]"...): get_images solo
+    da el primer filtro de la cadena.
+    """
+    doc = page.parent
+    return [
+        (im[0], im[2], im[3], im[4], doc.xref_get_key(im[0], "Filter")[1])
+        for im in page.get_images(full=True)
+    ]
+
+
+def _encode_g4(doc, xref, width, height):
+    """Imagen de 1 bit sin comprimir -> CCITT G4. True si los bits decodificados son idénticos."""
+    raw = doc.xref_stream(xref)
+    stride = (width + 7) // 8
+    if not raw or len(raw) != stride * height:
+        return False
+    buf = fitz.mupdf.fz_compress_ccitt_fax_g4(fitz.mupdf.python_buffer_data(raw), width, height, stride)
+    encoded = buf.fz_buffer_extract()
+    doc.update_stream(xref, encoded, compress=False)
+    doc.xref_set_key(xref, "Filter", "/CCITTFaxDecode")
+    doc.xref_set_key(xref, "DecodeParms", f"<</K -1 /Columns {width} /Rows {height}>>")
+    if doc.xref_stream(xref) == raw:
+        # En 1 bit, el gris ICC que pone MuPDF equivale a DeviceGray y ahorra el perfil (~3 KB).
+        # Las máscaras (ImageMask) no llevan espacio de color.
+        if doc.xref_get_key(xref, "ImageMask")[1] != "true":
+            doc.xref_set_key(xref, "ColorSpace", "/DeviceGray")
+        return True
+    # No debería pasar: se vuelve a la copia sin pérdida.
+    doc.update_stream(xref, raw)
+    doc.xref_set_key(xref, "DecodeParms", "null")
+    return False
+
+
+def _encode_jpeg(doc, xref, original_xref, original_filter):
+    """Imagen de 8 bits gris o RGB sin comprimir -> JPEG con la calidad del original."""
+    pix = fitz.Pixmap(doc, xref)
+    if pix.alpha or pix.n not in (1, 3):
+        return False  # CMYK u otros: se queda sin pérdida (Flate)
+    quality = None
+    if "DCT" in original_filter:
+        try:
+            quality = jpeg_quality(doc.extract_image(original_xref)["image"])
+        except Exception:
+            quality = None
+    jpeg = pix.tobytes("jpg", jpg_quality=quality or DEFAULT_JPEG_QUALITY)
+    if "DCT" not in original_filter:
+        # JPEG 2000: sin calidad que copiar; si Flate sin pérdida ocupa menos, se queda en Flate.
+        raw = doc.xref_stream(xref)
+        if len(zlib.compress(raw, 6)) <= len(jpeg):
+            return False
+    wrapped = zlib.compress(jpeg, 9)
+    if len(wrapped) < len(jpeg):  # como jpeg_flate.py: la capa Flate, si ahorra
+        doc.update_stream(xref, wrapped, compress=False)
+        doc.xref_set_key(xref, "Filter", "[/FlateDecode /DCTDecode]")
+    else:
+        doc.update_stream(xref, jpeg, compress=False)
+        doc.xref_set_key(xref, "Filter", "/DCTDecode")
+    doc.xref_set_key(xref, "DecodeParms", "null")
+    doc.xref_set_key(xref, "BitsPerComponent", "8")
+    return True
+
+
+def recompress_redacted_images(doc, page, before):
+    """Recomprime las imágenes que apply_redactions acaba de sustituir en `page`.
+
+    `before`: _image_slots(page) antes de censurar. Devuelve cuántas se recomprimieron.
+    """
+    done = 0
+    after = _image_slots(page)
+    after_xrefs = {b[0] for b in after}
+    before_xrefs = {b[0] for b in before}
+    # La copia nueva cambia de xref y de nombre de recurso: se empareja con la imagen que ha
+    # desaparecido de la página y tiene las mismas dimensiones y bits por componente (en un
+    # escaneo, el fondo en color y la máscara de texto suelen medir lo mismo).
+    replaced = [b for b in before if b[0] not in after_xrefs]
+    for xref, width, height, bits, filt in after:
+        if xref in before_xrefs or filt != "null":
+            continue  # sin cambios, o ya comprimida
+        match = next((b for b in replaced if b[1:4] == (width, height, bits)), None)
+        if match is None:
+            continue
+        replaced.remove(match)
+        original_xref, original_filter = match[0], match[4]
+        bpc = doc.xref_get_key(xref, "BitsPerComponent")[1]
+        try:
+            if bpc == "1":
+                ok = _encode_g4(doc, xref, width, height)
+            elif bpc == "8" and ("DCT" in original_filter or "JPX" in original_filter):
+                ok = _encode_jpeg(doc, xref, original_xref, original_filter)
+            else:
+                ok = False
+        except Exception as e:  # nunca tumba la censura: la imagen queda sin pérdida
+            print(f"Aviso en redact.py: no se pudo recomprimir una imagen: {e}", file=sys.stderr)
+            ok = False
+        done += ok
+    return done
+
+
+# ==========================================
+# 5. MARCADORES
 # ==========================================
 def remove_outline_terms(doc, terms):
     """Quita los marcadores cuyo título contiene un término; sus hijos suben de nivel."""
@@ -350,7 +502,7 @@ def remove_outline_terms(doc, terms):
 
 
 # ==========================================
-# 5. VERIFICACIÓN FINAL
+# 6. VERIFICACIÓN FINAL
 # ==========================================
 def _contains_term(value, terms):
     v = norm(value if isinstance(value, str) else str(value or ""))
@@ -577,7 +729,9 @@ def apply(input_path, output_path, items):
         if page.number in zones_by_page:
             # CRÍTICO: images=fitz.PDF_REDACT_IMAGE_PIXELS garantiza la destrucción
             # a nivel de píxel del escaneo subyacente. No se puede recuperar el dato tapado.
+            before = _image_slots(page)
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
+            recompress_redacted_images(doc, page, before)
 
     remove_outline_terms(doc, terms)
     doc = compact_xref(doc)

@@ -66,6 +66,13 @@
 - Texto conservado: se comparan las palabras (también las de la capa OCR) fuera de las zonas antes y después;
   si falta alguna, se entrega igual pero con `X-Redact-Text-Loss: [páginas]` y el
   frontend lo avisa en el panel final.
+- Tamaño de salida: `apply_redactions(PDF_REDACT_IMAGE_PIXELS)` sustituye cada imagen que
+  toca una zona por una copia sin comprimir (un escaneo JPEG en gris pasaba de 24 a 67 MB).
+  `recompress_redacted_images` la vuelve a codificar como el original: JPEG con la calidad
+  estimada de su tabla de cuantización (DQT), 1 bit en CCITT G4 sin pérdida (con comprobación de
+  ida y vuelta) y JPEG 2000 en lo que ocupe menos, JPEG 85 o Flate. CMYK y el resto, sin
+  pérdida (Flate). La copia se empareja con su original por ancho, alto y bits por componente
+  (MuPDF cambia el xref y el nombre del recurso).
 - Tests: `python -m unittest redact_test.py` (PyMuPDF real, PDFs sintéticos) y
   `redact-verify.test.js` (ruta con redact.py simulado, dentro de `npm test`).
 

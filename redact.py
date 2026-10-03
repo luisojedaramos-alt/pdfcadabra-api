@@ -11,6 +11,8 @@ from collections import Counter
 
 import pymupdf as fitz
 
+import pdf_check
+
 fitz.TOOLS.mupdf_display_errors(False)
 
 # Metadatos que escribimos en la salida: la verificación final no los cuenta como fuga
@@ -809,6 +811,11 @@ def apply(input_path, output_path, items):
 def main(argv):
     action = argv[1]
     input_path = argv[2]
+    # Con contraseña de apertura no se busca ni se censura nada: server.js responde 422
+    # PDF_ENCRYPTED. Los de solo propietario se abren con la contraseña vacía y siguen.
+    if pdf_check.needs_password(fitz.open(input_path)):
+        print("PDF con contraseña de apertura", file=sys.stderr)
+        sys.exit(pdf_check.EXIT_ENCRYPTED)
     if action == "search":
         search(input_path, argv[3], argv[4])
     elif action == "apply":

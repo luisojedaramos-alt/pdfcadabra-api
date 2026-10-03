@@ -26,6 +26,8 @@ import sys
 
 import pymupdf
 
+import pdf_check
+
 MAX_COLORS = 16
 # Las de 8 bits se decodifican para contar colores: por encima de esto no compensa.
 MAX_COUNT_PIXELS = 40_000_000
@@ -232,9 +234,12 @@ def main(argv):
         print("Uso: python3 lossless_images.py protect <entrada.pdf> <salida.pdf>", file=sys.stderr)
         return 2
     doc = pymupdf.open(argv[2])
-    if doc.needs_pass:
-        print(0)  # Ghostscript tampoco podrá abrirlo: que dé él el error de siempre
-        return 0
+    # Con contraseña de apertura no se procesa nada: server.js responde 422 PDF_ENCRYPTED. Antes
+    # se daba por hecho que Ghostscript fallaría, pero sale con 0 y escribe una página en blanco.
+    # Los de solo contraseña de propietario se abren con la vacía y siguen como cualquier otro.
+    if pdf_check.needs_password(doc):
+        print("PDF con contraseña de apertura", file=sys.stderr)
+        return pdf_check.EXIT_ENCRYPTED
     protected = protect(doc)
     if protected:
         doc.save(argv[3])

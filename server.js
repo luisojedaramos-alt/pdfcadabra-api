@@ -217,8 +217,20 @@ const runHeavy = (req, command, args, callback, { keepSlot = false, timeoutMs = 
 // Proceso matado por su timeout (runHeavy lo lanza con killSignal SIGKILL).
 const isExecTimeout = (error) => error.killed && error.signal === 'SIGKILL';
 
-// 504 si el proceso superó su tope de tiempo; si no, el 500 propio de cada ruta.
+// PDF con contraseña de apertura: lossless_images.py y redact.py salen con este
+// código (pdf_check.EXIT_ENCRYPTED) sin procesar nada. Los de solo contraseña de propietario se
+// abren con la contraseña vacía y se procesan como cualquier otro.
+const EXIT_ENCRYPTED = 3;
+const isEncryptedExit = (error) => !!error && error.code === EXIT_ENCRYPTED && !isExecTimeout(error);
+const sendEncrypted = (res) => res.status(422).json({
+    code: 'PDF_ENCRYPTED',
+    error: 'Este PDF está protegido con contraseña. Quítala primero con Desbloquear PDF y vuelve a intentarlo.'
+});
+
+// 504 si el proceso superó su tope de tiempo; 422 si el PDF tiene contraseña de apertura; si
+// no, el 500 propio de cada ruta.
 const sendExecError = (res, error, fallbackMessage) => {
+    if (isEncryptedExit(error)) return sendEncrypted(res);
     if (isExecTimeout(error)) {
         return res.status(504).json({ code: 'PROCESSING_TIMEOUT', error: 'El documento ha tardado demasiado en procesarse.' });
     }
@@ -254,7 +266,8 @@ app.post('/v1/redact/search', upload.single('file'), heavyGate, (req, res) => {
 
         runHeavy(req, 'python3', ['redact.py', 'search', inputPath, patternsPath, resultsPath], (error, stdout, stderr) => {
             if (error) {
-                logProcessError("Error en búsqueda:", error, stderr);
+                if (isEncryptedExit(error)) console.warn('[Redact] PDF con contraseña de apertura: 422 sin procesar.');
+                else logProcessError("Error en búsqueda:", error, stderr);
                 secureCleanup([inputPath, patternsPath, resultsPath]);
                 return sendExecError(res, error, 'Error analizando el documento.');
             }
@@ -297,7 +310,8 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
         // NUEVO: Se añade el quinto argumento (resultsPath) al comando Python
         runHeavy(req, 'python3', ['redact.py', 'apply', inputPath, outputPath, itemsPath, resultsPath], (error, stdout, stderr) => {
             if (error) {
-                logProcessError("Error en censura:", error, stderr);
+                if (isEncryptedExit(error)) console.warn('[Redact] PDF con contraseña de apertura: 422 sin procesar.');
+                else logProcessError("Error en censura:", error, stderr);
                 secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
                 return sendExecError(res, error, 'Error aplicando la censura forense.');
             }
@@ -529,7 +543,8 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
 
     function fail({ error, stderr, label }) {
         releaseSlot();
-        if (label) logProcessError(label, error, stderr);
+        if (isEncryptedExit(error)) console.warn('[Compress] PDF con contraseña de apertura: 422 sin procesar.');
+        else if (label) logProcessError(label, error, stderr);
         cleanupAll();
         return sendExecError(res, error, 'Fallo en el motor de compresión.');
     }

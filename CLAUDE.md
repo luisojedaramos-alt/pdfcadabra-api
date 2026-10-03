@@ -105,6 +105,20 @@
   códigos necesita `pip install -r requirements-test.txt` (zxing-cpp y Pillow, solo para tests,
   no van en la imagen); sin ellos esas pruebas se saltan con un aviso.
 
+# PDF con contraseña (pdf_check.py)
+
+- Caso a), contraseña de apertura: `/v1/compress`, `/v1/redact/search` y `/v1/redact/apply`
+  responden 422 `{code: "PDF_ENCRYPTED"}` sin procesar nada. Lo detecta el primer script de
+  cada ruta (`lossless_images.py protect` en Comprimir, `redact.py` en Anonimizar) con
+  `pdf_check.needs_password` y sale con el código 3 (`EXIT_ENCRYPTED`), que `server.js`
+  traduce a 422. Antes Comprimir daba 200 con el original o con una página en blanco
+  (Ghostscript sale con 0 ante "This file requires a password") y Anonimizar un 500 genérico.
+- Caso b), solo contraseña de propietario (habitual en sedes judiciales): PyMuPDF lo abre con
+  la contraseña vacía y se procesa como cualquier otro; la salida va sin cifrar.
+- El frontend ya los rechaza en el navegador antes de subirlos; el 422 es la red de seguridad.
+- Tests: `python -m unittest pdf_check_test.py` y `pdf-encrypted.test.js` (servidor real con
+  python3, PyMuPDF y gs; se salta si faltan; en Windows `PYTHON=python` y `GS=<gswin64c.exe>`).
+
 # Pendientes
 
 - Trixie trae el paquete `jbig2` (jbig2enc), que bookworm no tenía, por si se

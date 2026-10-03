@@ -1,0 +1,5 @@
+# Solo para los tests (python -m unittest lossless_images_test.py): generar y decodificar
+# QR y códigos de barras. No va en la imagen de producción (el Dockerfile solo instala PyMuPDF).
+# Sin ellos, esas pruebas se saltan con un aviso.
+zxing-cpp==3.1.1
+pillow==12.3.0

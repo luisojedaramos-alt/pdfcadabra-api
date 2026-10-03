@@ -76,6 +76,32 @@
 - Tests: `python -m unittest redact_test.py` (PyMuPDF real, PDFs sintéticos) y
   `redact-verify.test.js` (ruta con redact.py simulado, dentro de `npm test`).
 
+# Comprimir: imágenes sin pérdida (lossless_images.py)
+
+- Regla: las imágenes de 1 bit (DeviceGray, ICCBased, Indexed de 2 colores, ImageMask, JBIG2...),
+  las Indexed de hasta 16 colores y las de 8 bits sin JPEG con hasta 16 colores (QR o sello
+  insertados desde PNG) salen SIN PÉRDIDA y SIN REDUCIR en todos los niveles. Suelen ser el
+  código de barras o el QR del CSV, que debe seguir siendo escaneable. Ghostscript no lo
+  respeta por sí solo: pasaba una barra de 1 bit en ICCBased a JPEG RGB a la mitad de ppp.
+- Cómo: `lossless_images.py protect` sustituye cada una por un marcador (ImageMask de 64x2 con
+  su número de objeto) antes de gs; `jpeg_flate.py --originals <subida>` pone después la
+  original con su flujo comprimido tal cual (las de 1 bit en Flate pasan a CCITT G4 si ocupa
+  menos) y falla si queda algún marcador, también dentro de un contenido. Por eso gs va con
+  `-dMaxInlineImageSize=0` (si no, mete los marcadores en el contenido) y sin reducir B/N.
+  Con marcadores, la salida de gs nunca se envía sin restaurar: si el tope se agota antes, 504.
+- Decisión de Luis (2026-10-03): la regla se aplica completa, también a las máscaras de texto
+  de página completa de los escaneos (ImageMask de 1 bit), aunque pesen más. Motivo: los
+  escaneos judiciales llevan el código CSV (barras o QR) dentro de esa misma imagen de página,
+  así que reducirla o pasarla a JPEG puede dejarlo ilegible. No proteger solo las imágenes
+  pequeñas para recuperar tamaño.
+- Coste medido (2026-10-03, gs 10.08 local): escaneo gris 51 págs igual; expediente 155 págs
+  recomendada 1,80 -> 2,17 MB y extrema 1,17 -> 1,55 MB (las máscaras de texto CCITT ya no
+  bajan a 150 ppp); escaneo color 23 págs extrema 0,78 -> 1,42 MB por lo mismo.
+- Tests: `python -m unittest lossless_images_test.py` (gs real con los argumentos de server.js:
+  píxeles idénticos y QR/Code128 decodificables en los tres niveles). Generar y decodificar los
+  códigos necesita `pip install -r requirements-test.txt` (zxing-cpp y Pillow, solo para tests,
+  no van en la imagen); sin ellos esas pruebas se saltan con un aviso.
+
 # Pendientes
 
 - Trixie trae el paquete `jbig2` (jbig2enc), que bookworm no tenía, por si se

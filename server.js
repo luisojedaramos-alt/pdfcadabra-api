@@ -119,8 +119,8 @@ const removeTempDir = (dir) => {
 // Red de seguridad: borra de UPLOAD_DIR lo que tenga más de 15 minutos, al arrancar y
 // cada 5 minutos (archivos que quedaron si el proceso murió a mitad de una petición).
 // Ninguna petición legítima dura tanto: cola máx. 90 s + máx. 180 s por proceso (por
-// defecto) en Anonimizar; Comprimir encadena hasta cuatro procesos (gs y jpeg_flate.py,
-// más la red de seguridad), pero todos dentro de COMPRESS_TOTAL_TIMEOUT_MS.
+// defecto) en Anonimizar; Comprimir encadena hasta cinco procesos (lossless_images.py, gs
+// y jpeg_flate.py, más la red de seguridad), pero todos dentro de COMPRESS_TOTAL_TIMEOUT_MS.
 const SWEEP_MAX_AGE_MS = 15 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 startPeriodicSweep(UPLOAD_DIR, SWEEP_MAX_AGE_MS, SWEEP_INTERVAL_MS);
@@ -148,7 +148,7 @@ const envInt = (name, fallback) => {
 // Tope por proceso de Anonimizar (redact.py search/apply). Comprimir usa su propio tope
 // total, COMPRESS_TOTAL_TIMEOUT_MS.
 const HEAVY_EXEC_TIMEOUT_MS = envInt('HEAVY_EXEC_TIMEOUT_MS', 180000);
-// Tope TOTAL de /v1/compress: Ghostscript y jpeg_flate.py juntos, también los de la red de
+// Tope TOTAL de /v1/compress: lossless_images.py, Ghostscript y jpeg_flate.py juntos, también los de la red de
 // seguridad con el nivel low. Peor caso medido en la
 // instancia 0.5c-512mb (escaneo sintético de 20 MB y 23 páginas, nivel extremo): 14,4 s de
 // gs + 0,4 s de jpeg_flate.py. 90 s dejan margen para escaneos reales con muchas más
@@ -377,16 +377,16 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
 const MIN_COMPRESS_SAVING = 0.02;
 
 // Niveles de compresión: preset de Ghostscript + resolución objetivo (ppp) de las
-// imágenes en color/gris y de las de blanco y negro (null = no se reducen) + calidad
+// imágenes en color/gris (null = no se reducen) + calidad
 // JPEG con la que se recodifican las de color/gris (QFactor de Ghostscript; calibrado
 // con gs 10: QFactor = (100 − calidad IJG) / 50, así que 0,7 ≈ calidad 65 y 0,8 ≈ 60).
 // Calibrado (2026-10) frente a iLovePDF con un escaneo real en gris de 51 páginas a 300 ppp:
 // su recomendada es 150 ppp y ~q60, su extrema 72 ppp y ~q65.
 // extreme: máximo ahorro · recommended: equilibrio entre peso y legibilidad · low: sin reducir
 const COMPRESS_LEVELS = {
-    extreme: { pdfSettings: '/screen', colorDpi: 100, monoDpi: 150, jpegQFactor: 0.8 },
-    recommended: { pdfSettings: '/ebook', colorDpi: 150, monoDpi: 200, jpegQFactor: 0.7 },
-    low: { pdfSettings: '/printer', colorDpi: null, monoDpi: null, jpegQFactor: null }
+    extreme: { pdfSettings: '/screen', colorDpi: 100, jpegQFactor: 0.8 },
+    recommended: { pdfSettings: '/ebook', colorDpi: 150, jpegQFactor: 0.7 },
+    low: { pdfSettings: '/printer', colorDpi: null, jpegQFactor: null }
 };
 
 // Parámetros de reducción de un tipo de imagen ('Color', 'Gray' o 'Mono') para Ghostscript.
@@ -406,12 +406,15 @@ const downsampleArgs = (kind, dpi, threshold) =>
 // páginas la salida pesaba un 61 % MÁS que la entrada, y codificar en Flate era además lo
 // más lento (130 s frente a 55 s con 0,5 CPU). PassThroughJPEGImages=false: los JPEG que no
 // se reducen también se recodifican con la calidad del nivel.
-// Blanco y negro: siempre sin pérdida (CCITT G4; pdfwrite no codifica JBIG2). Umbral 1.0
-// (el mínimo), porque con el 1.5 por defecto 300 ppp no llega a bajar a 200; /Subsample es
-// el único método que Ghostscript admite para B/N. Los presets nunca reducen las imágenes
-// en blanco y negro (CCITT), que en los escaneos de juzgado suponen la mayor parte del peso.
+// Blanco y negro, Indexed de hasta 16 colores y demás imágenes de pocos colores (códigos
+// de barras, QR del CSV, sellos): nunca pasan por Ghostscript, lossless_images.py las
+// sustituye antes por marcadores (ImageMask de 64x2) y jpeg_flate.py vuelve a poner las
+// originales. Por eso B/N no se reduce nunca (un marcador reducido ya no se reconocería;
+// además, las de 1 bit no deben bajar de 300 ppp) y MaxInlineImageSize=0: sin él,
+// pdfwrite mete las imágenes pequeñas, también los marcadores, dentro del contenido de la
+// página. Lo que quede en B/N (imágenes en línea del original) sale en CCITT G4, sin pérdida.
 // Baja: sin reducir ni recodificar imágenes (solo reescritura, fuentes y deduplicación).
-const compressArgs = ({ pdfSettings, colorDpi, monoDpi, jpegQFactor }, inputPath, outputPath) => {
+const compressArgs = ({ pdfSettings, colorDpi, jpegQFactor }, inputPath, outputPath) => {
     const jpeg = jpegQFactor !== null;
     const imageDict = `<< /QFactor ${jpegQFactor} /Blend 1 /HSamples [2 1 1 2] /VSamples [2 1 1 2] >>`;
     return [
@@ -424,8 +427,8 @@ const compressArgs = ({ pdfSettings, colorDpi, monoDpi, jpegQFactor }, inputPath
             '-dAutoFilterGrayImages=false', '-dGrayImageFilter=/DCTEncode',
             '-dPassThroughJPEGImages=false'
         ] : []),
-        ...downsampleArgs('Mono', monoDpi, 1.0), '-dMonoImageDownsampleType=/Subsample',
-        '-dMonoImageFilter=/CCITTFaxEncode',
+        '-dDownsampleMonoImages=false', '-dMonoImageFilter=/CCITTFaxEncode',
+        '-dMaxInlineImageSize=0',
         '-dNOPAUSE', '-dQUIET', '-dBATCH', `-sOutputFile=${outputPath}`,
         // La calidad JPEG solo se puede fijar con setdistillerparams (después del preset).
         ...(jpeg ? ['-c', `<< /ColorImageDict ${imageDict} /GrayImageDict ${imageDict} >> setdistillerparams`, '-f'] : []),
@@ -446,7 +449,12 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
     const passPaths = (tag) => ({ gs: `${inputPath}_${tag}_gs.pdf`, out: `${inputPath}_${tag}.pdf` });
     const primaryPaths = passPaths('compressed');
     const fallbackPaths = passPaths('fallback');
-    const tempFiles = [inputPath, primaryPaths.gs, primaryPaths.out, fallbackPaths.gs, fallbackPaths.out];
+    // Entrada para Ghostscript con las imágenes protegidas sustituidas por marcadores.
+    const protectedPath = `${inputPath}_protected.pdf`;
+    // ¿Hay imágenes protegidas? Si las hay, Ghostscript lee protectedPath y la salida de gs
+    // no vale sin jpeg_flate.py (lleva marcadores en lugar de esas imágenes).
+    let hasProtected = false;
+    const tempFiles = [inputPath, protectedPath, primaryPaths.gs, primaryPaths.out, fallbackPaths.gs, fallbackPaths.out];
     // Carpeta temporal propia de Ghostscript (TMPDIR en Linux, TEMP/TMP en Windows): sus
     // archivos de trabajo (gs_*) no quedan sueltos en /tmp si se le mata por el tope de
     // tiempo. Se borra con el resto de temporales y, en último caso, con el barrido.
@@ -476,19 +484,26 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
 
     // Una pasada: Ghostscript y después jpeg_flate.py. done(fallo, rutaDelResultado).
     function runPass(conf, { gs: gsPath, out: outPath }, done) {
-        runHeavy(req, 'gs', compressArgs(conf, inputPath, gsPath), (error, stdout, stderr) => {
+        const gsInput = hasProtected ? protectedPath : inputPath;
+        runHeavy(req, 'gs', compressArgs(conf, gsInput, gsPath), (error, stdout, stderr) => {
             if (error) return done({ error, stderr, label: 'Error en compresión:' });
             if (remaining() <= 0) {
+                if (hasProtected) {
+                    return done({ error: Object.assign(new Error('Tope de compresión agotado'), { killed: true, signal: 'SIGKILL' }) });
+                }
                 console.warn('Tope de compresión agotado tras Ghostscript; se usa su salida sin jpeg_flate.py.');
                 return done(null, gsPath);
             }
             // Ghostscript quita la capa Flate a los JPEG que la llevaban: jpeg_flate.py la
-            // restaura (sin pérdida) cuando reduce su tamaño.
+            // restaura (sin pérdida) cuando reduce su tamaño. Con --originals vuelve a poner
+            // las imágenes protegidas.
+            const postArgs = ['jpeg_flate.py', gsPath, outPath, ...(hasProtected ? ['--originals', inputPath] : [])];
             try {
-                runHeavy(req, 'python3', ['jpeg_flate.py', gsPath, outPath], (error, stdout, stderr) => {
+                runHeavy(req, 'python3', postArgs, (error, stdout, stderr) => {
                     // Tope agotado en jpeg_flate.py: la salida de gs ya es un PDF válido, solo le
                     // falta restaurar la capa Flate de algunos JPEG. Mejor eso que un error.
-                    if (error && isExecTimeout(error)) {
+                    // Salvo con imágenes protegidas: sin restaurar, la salida lleva marcadores.
+                    if (error && isExecTimeout(error) && !hasProtected) {
                         console.warn('Tope de compresión agotado en jpeg_flate.py; se usa la salida de Ghostscript.');
                         return done(null, gsPath);
                     }
@@ -541,31 +556,50 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
         res.sendFile(compressed ? resultPath : inputPath, () => cleanupAll());
     }
 
-    runPass(COMPRESS_LEVELS[level], primaryPaths, (err, resultPath) => {
-        if (err) return fail(err);
-        const ok = savesEnough(resultPath);
-        if (ok === null) return statFailed();
-        if (ok) return send(resultPath, level);
-        // Red de seguridad: si recomendada o extrema no reducen, se intenta con la lógica
-        // de low (reescritura, fuentes y deduplicación, sin tocar imágenes) dentro del
-        // mismo tope antes de devolver el original.
-        if (level === 'low' || remaining() <= 0) return send(null);
-        console.warn(`Compresión ${level} sin ahorro suficiente; se reintenta con el nivel low.`);
-        runPass(COMPRESS_LEVELS.low, fallbackPaths, (fallbackErr, fallbackPath) => {
-            // Si la red de seguridad falla o se queda sin tiempo, el original sigue siendo
-            // una respuesta válida: no se convierte en error.
-            if (fallbackErr) {
-                if (fallbackErr.label) {
-                    const label = fallbackErr.label.replace(/:$/, ' (red de seguridad, nivel low):');
-                    logProcessError(label, fallbackErr.error, fallbackErr.stderr);
+    // Antes de Ghostscript, una sola vez para las dos pasadas: lossless_images.py sustituye
+    // las imágenes que no admiten pérdida por marcadores y dice cuántas (0 = no escribe nada).
+    function protectImages(done) {
+        try {
+            runHeavy(req, 'python3', ['lossless_images.py', 'protect', inputPath, protectedPath], (error, stdout, stderr) => {
+                if (error) return done({ error, stderr, label: 'Error preparando la compresión:' });
+                hasProtected = Number.parseInt(String(stdout).trim(), 10) > 0;
+                done(null);
+            }, { keepSlot: true, timeoutMs: Math.max(1, remaining()) });
+        } catch (e) {
+            console.error('Error lanzando la preparación de la compresión:', describeError(e));
+            done({ error: e });
+        }
+    }
+
+    function compressAll() {
+        runPass(COMPRESS_LEVELS[level], primaryPaths, (err, resultPath) => {
+            if (err) return fail(err);
+            const ok = savesEnough(resultPath);
+            if (ok === null) return statFailed();
+            if (ok) return send(resultPath, level);
+            // Red de seguridad: si recomendada o extrema no reducen, se intenta con la lógica
+            // de low (reescritura, fuentes y deduplicación, sin tocar imágenes) dentro del
+            // mismo tope antes de devolver el original.
+            if (level === 'low' || remaining() <= 0) return send(null);
+            console.warn(`Compresión ${level} sin ahorro suficiente; se reintenta con el nivel low.`);
+            runPass(COMPRESS_LEVELS.low, fallbackPaths, (fallbackErr, fallbackPath) => {
+                // Si la red de seguridad falla o se queda sin tiempo, el original sigue siendo
+                // una respuesta válida: no se convierte en error.
+                if (fallbackErr) {
+                    if (fallbackErr.label) {
+                        const label = fallbackErr.label.replace(/:$/, ' (red de seguridad, nivel low):');
+                        logProcessError(label, fallbackErr.error, fallbackErr.stderr);
+                    }
+                    return send(null);
                 }
-                return send(null);
-            }
-            const fallbackOk = savesEnough(fallbackPath);
-            if (fallbackOk === null) return statFailed();
-            send(fallbackOk ? fallbackPath : null, 'low');
+                const fallbackOk = savesEnough(fallbackPath);
+                if (fallbackOk === null) return statFailed();
+                send(fallbackOk ? fallbackPath : null, 'low');
+            });
         });
-    });
+    }
+
+    protectImages((protectErr) => (protectErr ? fail(protectErr) : compressAll()));
 });
 
 // Manejo de errores no gestionados: debe ir el último y tener 4 argumentos para que

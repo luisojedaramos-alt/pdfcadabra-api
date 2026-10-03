@@ -10,10 +10,22 @@ const childProcess = require('child_process');
 const INPUT = Buffer.alloc(10000, 'a');
 // Tamaño de la salida de gs según el preset (null = gs muere por el tope de tiempo).
 let gsSizes = {};
+// Imágenes que lossless_images.py dice haber protegido (con > 0 escribe la entrada de gs).
+let protectedCount = 0;
 const calls = [];
 
 childProcess.execFile = (command, args, options, callback) => {
     calls.push({ command, args, options });
+    if (args[0] === 'lossless_images.py') {
+        if (protectedCount < 0) {
+            setImmediate(() => callback(Object.assign(new Error('falla'), { code: 1 }), '', 'Traceback'));
+            return {};
+        }
+        if (protectedCount > 0) fs.copyFileSync(args[2], args[3]);
+        setImmediate(() => callback(null, `${protectedCount}
+`, ''));
+        return {};
+    }
     if (command !== 'gs') {
         // jpeg_flate.py: copia la entrada tal cual.
         fs.copyFileSync(args[1], args[2]);
@@ -52,9 +64,9 @@ async function compress(t, level) {
 const gsPresets = () => calls.filter((c) => c.command === 'gs').map((c) => c.args.find((a) => a.startsWith('-dPDFSETTINGS=')));
 const outputs = () => calls.flatMap((c) => (c.command === 'gs'
     ? [c.args.find((a) => a.startsWith('-sOutputFile=')).slice('-sOutputFile='.length)]
-    : [c.args[2]]));
+    : [c.args[0] === 'lossless_images.py' ? c.args[3] : c.args[2]]));
 
-test('recomendada: color y gris a 150 ppp con Bicubic en JPEG calidad ~65, B/N sin pérdida', () => {
+test('recomendada: color y gris a 150 ppp con Bicubic en JPEG calidad ~65, B/N sin reducir y sin pérdida', () => {
     const args = compressArgs(COMPRESS_LEVELS.recommended, 'in.pdf', 'out.pdf');
     for (const a of [
         '-dPDFSETTINGS=/ebook',
@@ -64,7 +76,7 @@ test('recomendada: color y gris a 150 ppp con Bicubic en JPEG calidad ~65, B/N s
         '-dAutoFilterColorImages=false', '-dColorImageFilter=/DCTEncode',
         '-dAutoFilterGrayImages=false', '-dGrayImageFilter=/DCTEncode',
         '-dPassThroughJPEGImages=false',
-        '-dMonoImageResolution=200', '-dMonoImageFilter=/CCITTFaxEncode', '-dMonoImageDownsampleType=/Subsample'
+        '-dDownsampleMonoImages=false', '-dMonoImageFilter=/CCITTFaxEncode', '-dMaxInlineImageSize=0'
     ]) assert.ok(args.includes(a), `falta ${a}`);
     const ps = args[args.indexOf('-c') + 1];
     assert.match(ps, /\/ColorImageDict << \/QFactor 0\.7 /);
@@ -73,16 +85,17 @@ test('recomendada: color y gris a 150 ppp con Bicubic en JPEG calidad ~65, B/N s
     assert.ok(!args.some((a) => /Mono.*DCT|JBIG2/i.test(a)), 'B/N nunca con pérdida');
 });
 
-test('extrema: 100 ppp con Bicubic, JPEG calidad ~60 (QFactor 0.8), B/N a 150 sin pérdida', () => {
+test('extrema: 100 ppp con Bicubic, JPEG calidad ~60 (QFactor 0.8), B/N sin reducir y sin pérdida', () => {
     const args = compressArgs(COMPRESS_LEVELS.extreme, 'in.pdf', 'out.pdf');
     assert.ok(args.includes('-dPDFSETTINGS=/screen'));
     assert.ok(args.includes('-dColorImageResolution=100'));
     assert.ok(args.includes('-dGrayImageResolution=100'));
     assert.ok(args.includes('-dColorImageDownsampleType=/Bicubic'));
     assert.ok(args.includes('-dGrayImageDownsampleType=/Bicubic'));
-    assert.ok(args.includes('-dMonoImageResolution=150'));
+    assert.ok(args.includes('-dDownsampleMonoImages=false'));
     assert.match(args[args.indexOf('-c') + 1], /\/QFactor 0\.8 /);
     assert.ok(args.includes('-dMonoImageFilter=/CCITTFaxEncode'));
+    assert.ok(args.includes('-dMaxInlineImageSize=0'));
 });
 
 test('baja: sin cambios (ni reducción ni JPEG forzado)', () => {
@@ -93,6 +106,57 @@ test('baja: sin cambios (ni reducción ni JPEG forzado)', () => {
     assert.ok(!args.includes('-c'));
     assert.ok(!args.some((a) => a.includes('DCTEncode') || a.includes('PassThroughJPEG')));
     assert.equal(args.at(-1), 'in.pdf');
+});
+
+// Los marcadores de lossless_images.py no pueden acabar dentro del contenido (imágenes en
+// línea) ni reducidos: en ningún nivel.
+test('todos los niveles: B/N sin reducir e imágenes siempre como objetos', () => {
+    for (const conf of Object.values(COMPRESS_LEVELS)) {
+        const args = compressArgs(conf, 'in.pdf', 'out.pdf');
+        assert.ok(args.includes('-dDownsampleMonoImages=false'));
+        assert.ok(args.includes('-dMaxInlineImageSize=0'));
+        assert.ok(!args.some((a) => a.startsWith('-dMonoImageResolution')));
+    }
+});
+
+test('sin imágenes protegidas, gs lee la subida y jpeg_flate.py va sin --originals', async (t) => {
+    calls.length = 0;
+    protectedCount = 0;
+    gsSizes = { '/ebook': 4000 };
+    const { res } = await compress(t, 'recommended');
+    assert.equal(res.status, 200);
+    const [protect, gs, post] = calls;
+    assert.deepEqual(protect.args.slice(0, 2), ['lossless_images.py', 'protect']);
+    assert.equal(gs.args.at(-1), protect.args[2]);
+    assert.equal(post.args[0], 'jpeg_flate.py');
+    assert.ok(!post.args.includes('--originals'));
+});
+
+test('con imágenes protegidas, gs lee la entrada con marcadores y jpeg_flate.py restaura del original', async (t) => {
+    calls.length = 0;
+    protectedCount = 3;
+    gsSizes = { '/ebook': 15000, '/printer': 6000 };
+    const { res } = await compress(t, 'recommended');
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('x-compress-level'), 'low');
+    const protect = calls[0];
+    const [input, marked] = protect.args.slice(2);
+    assert.equal(calls.filter((c) => c.args[0] === 'lossless_images.py').length, 1, 'una sola vez para las dos pasadas');
+    for (const gs of calls.filter((c) => c.command === 'gs')) assert.equal(gs.args.at(-1), marked);
+    for (const post of calls.filter((c) => c.args[0] === 'jpeg_flate.py')) {
+        assert.deepEqual(post.args.slice(3), ['--originals', input]);
+    }
+    for (const f of outputs()) assert.equal(fs.existsSync(f), false, `${f} debe borrarse`);
+    protectedCount = 0;
+});
+
+test('si lossless_images.py falla, 500 sin lanzar gs', async (t) => {
+    calls.length = 0;
+    protectedCount = -1;
+    const { res } = await compress(t, 'recommended');
+    assert.equal(res.status, 500);
+    assert.equal(calls.some((c) => c.command === 'gs'), false);
+    protectedCount = 0;
 });
 
 test('si el nivel pedido reduce, no hay red de seguridad', async (t) => {

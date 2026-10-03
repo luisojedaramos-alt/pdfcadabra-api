@@ -14,6 +14,11 @@ let gsMode = 'ok';
 const gsCalls = [];
 
 childProcess.execFile = (command, args, options, callback) => {
+    if (args[0] === 'lossless_images.py') {
+        // protect: sin imágenes que proteger (no escribe salida).
+        setImmediate(() => callback(null, '0\n', ''));
+        return {};
+    }
     if (command !== 'gs') {
         // jpeg_flate.py: copia la entrada tal cual.
         fs.copyFileSync(args[1], args[2]);

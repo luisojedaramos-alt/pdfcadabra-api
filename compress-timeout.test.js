@@ -13,10 +13,18 @@ process.env.COMPRESS_TOTAL_TIMEOUT_MS = String(TOTAL_MS);
 
 const GS_OUTPUT = Buffer.from('%PDF-1.4\n% salida simulada de Ghostscript\n%%EOF\n');
 let gsDelayMs = 0;
+// Imágenes que lossless_images.py dice haber protegido (con > 0, la salida de gs lleva marcadores).
+let protectedCount = 0;
 const calls = [];
 
 childProcess.execFile = (command, args, options, callback) => {
     calls.push({ command, args, options });
+    if (args[0] === 'lossless_images.py') {
+        if (protectedCount > 0) fs.copyFileSync(args[2], args[3]);
+        setImmediate(() => callback(null, `${protectedCount}
+`, ''));
+        return {};
+    }
     if (command === 'gs') {
         // Escribe su salida y termina bien (el falso no respeta su timeout: así se puede
         // simular un gs que acaba justo después de agotarse el tope).
@@ -58,6 +66,7 @@ async function assertCleanedUp(file) {
 
 test('si el tope se agota en jpeg_flate.py, devuelve la salida de Ghostscript', async (t) => {
     calls.length = 0;
+    protectedCount = 0;
     gsDelayMs = 5;
     const { res, body } = await compress(t);
 
@@ -66,7 +75,7 @@ test('si el tope se agota en jpeg_flate.py, devuelve la salida de Ghostscript', 
     assert.deepEqual(body, GS_OUTPUT);
 
     const gs = calls.find((c) => c.command === 'gs');
-    const py = calls.find((c) => c.command === 'python3');
+    const py = calls.find((c) => c.args[0] === 'jpeg_flate.py');
     // gs recibe lo que queda del tope total: deadline - Date.now() al lanzarlo, así que
     // puede llegar con 1-2 ms menos si entre medias pasa el reloj (mkdirSync, etc.).
     assert.ok(gs.options.timeout <= TOTAL_MS && gs.options.timeout >= TOTAL_MS - TIMER_MARGIN_MS,
@@ -78,11 +87,39 @@ test('si el tope se agota en jpeg_flate.py, devuelve la salida de Ghostscript', 
 
 test('si el tope ya se agotó al acabar Ghostscript, devuelve su salida sin lanzar jpeg_flate.py', async (t) => {
     calls.length = 0;
+    protectedCount = 0;
     gsDelayMs = TOTAL_MS + 50;
     const { res, body } = await compress(t);
 
     assert.equal(res.status, 200);
     assert.deepEqual(body, GS_OUTPUT);
-    assert.equal(calls.some((c) => c.command === 'python3'), false);
+    assert.equal(calls.some((c) => c.args[0] === 'jpeg_flate.py'), false);
+    await assertCleanedUp(gsOutputPath());
+});
+
+// Con imágenes protegidas, la salida de gs lleva marcadores en lugar de los códigos de
+// barras: nunca se envía sin el paso que las restaura.
+test('con imágenes protegidas, si el tope se agota en jpeg_flate.py: 504, no la salida de gs', async (t) => {
+    calls.length = 0;
+    protectedCount = 2;
+    gsDelayMs = 5;
+    const { res, body } = await compress(t);
+
+    assert.equal(res.status, 504);
+    assert.notDeepEqual(body, GS_OUTPUT);
+    const gs = calls.find((c) => c.command === 'gs');
+    assert.match(gs.args.at(-1), /_protected\.pdf$/, 'gs lee la entrada con marcadores');
+    await assertCleanedUp(gsOutputPath());
+});
+
+test('con imágenes protegidas, si el tope se agota en gs: 504 sin lanzar jpeg_flate.py', async (t) => {
+    calls.length = 0;
+    protectedCount = 1;
+    gsDelayMs = TOTAL_MS + 50;
+    const { res, body } = await compress(t);
+
+    assert.equal(res.status, 504);
+    assert.notDeepEqual(body, GS_OUTPUT);
+    assert.equal(calls.some((c) => c.args[0] === 'jpeg_flate.py'), false);
     await assertCleanedUp(gsOutputPath());
 });

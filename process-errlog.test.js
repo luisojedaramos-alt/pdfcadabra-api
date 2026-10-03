@@ -44,6 +44,10 @@ test('proceso matado: señal en vez de código; stderr vacío', () => {
 
 test('POST /v1/compress con gs fallando: el log sigue esas reglas', async (t) => {
     childProcess.execFile = (command, args, options, callback) => {
+        if (args[0] === 'lossless_images.py') {
+            setImmediate(() => callback(null, '0\n', ''));
+            return {};
+        }
         const input = args[args.length - 1]; // gs recibe la subida al final
         setImmediate(() => callback(exitError(1), '', `**** Error leyendo ${input}\n${'z'.repeat(400)}`));
         return {};

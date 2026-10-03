@@ -7,16 +7,23 @@ original. Este paso la restaura: comprime con zlib el JPEG ya codificado (los
 píxeles no cambian) y solo lo sustituye si así ocupa menos. No toca nada más del
 documento.
 
-Uso: python3 jpeg_flate.py <entrada.pdf> <salida.pdf>
+Con --originals, antes vuelve a poner las imágenes que lossless_images.py sustituyó por
+marcadores antes de Ghostscript, copiándolas del PDF de entrada (sin marcadores).
+
+Uso: python3 jpeg_flate.py <entrada.pdf> <salida.pdf> [--originals <original.pdf>]
 """
 import sys
 import zlib
 
 import pymupdf
 
+import lossless_images
 
-def main(input_path, output_path):
+
+def main(input_path, output_path, originals_path=None):
     doc = pymupdf.open(input_path)
+    if originals_path:
+        lossless_images.restore(doc, pymupdf.open(originals_path))
     for xref in range(1, doc.xref_length()):
         if doc.xref_get_key(xref, "Subtype") != ("name", "/Image"):
             continue
@@ -45,7 +52,12 @@ def main(input_path, output_path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Uso: python3 jpeg_flate.py <entrada.pdf> <salida.pdf>", file=sys.stderr)
+    args = sys.argv[1:]
+    originals = None
+    if len(args) == 4 and args[2] == "--originals":
+        originals = args[3]
+        args = args[:2]
+    if len(args) != 2:
+        print("Uso: python3 jpeg_flate.py <entrada.pdf> <salida.pdf> [--originals <original.pdf>]", file=sys.stderr)
         sys.exit(2)
-    main(sys.argv[1], sys.argv[2])
+    main(args[0], args[1], originals)

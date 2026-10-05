@@ -203,14 +203,15 @@ const heavyGate = async (req, res, next) => {
     next();
 };
 
-// Lanza el proceso hijo con timeout y libera el hueco al terminar (éxito, error o timeout).
-// keepSlot: si el proceso termina bien, el hueco sigue ocupado para el siguiente paso de
-// la misma petición, que es quien lo libera (release es idempotente).
+// Lanza el proceso hijo con timeout.
+// keepSlot=false: libera el hueco al terminar, tanto en éxito como en error o timeout.
+// keepSlot=true: el llamador conserva la responsabilidad del hueco hasta terminar toda
+// su cadena, también si un proceso devuelve error (release es idempotente).
 const runHeavy = (req, command, args, callback, { keepSlot = false, timeoutMs = HEAVY_EXEC_TIMEOUT_MS, env } = {}) => {
     const options = { timeout: timeoutMs, killSignal: 'SIGKILL' };
     if (env) options.env = env;
     const child = execFile(command, args, options, (error, stdout, stderr) => {
-        if ((!keepSlot || error) && req.releaseSlot) req.releaseSlot();
+        if (!keepSlot && req.releaseSlot) req.releaseSlot();
         callback(error, stdout, stderr);
     });
     req.execStarted = true; // tras execFile: si este lanzase una excepción, el 'close' aún libera el hueco

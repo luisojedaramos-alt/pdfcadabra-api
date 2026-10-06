@@ -1,0 +1,687 @@
+"""Regresión de la auditoría de Anonimizar (2026-10-07): caminos por los que el término
+censurado podía seguir en el PDF entregado.
+
+Cada caso genera su PDF sintético al vuelo (sin PDFs en el repo), lo censura con
+redact.apply y comprueba lo que haría /v1/redact/apply con el informe:
+- LeakTests: el término sigue recuperable si se entrega -> NO debe entregarse (422).
+- CorrectTests: casos que la auditoría dio por correctos -> se entregan (200), sin el
+  término en ningún objeto descomprimido y sin perder el texto de control.
+
+Uso: python -m unittest redact_leaks_test.py   (necesita PyMuPDF, como redact.py)
+"""
+import os
+import shutil
+import tempfile
+import unittest
+
+import pymupdf as fitz
+
+import redact
+
+TERM = "SECRETO7731"
+CONTROL = "control"
+
+
+def server_delivers(report):
+    """Lo que decide server.js en /v1/redact/apply con el informe de redact.py: True si
+    responde 200 con el documento. Mantener igual que server.js."""
+    if not report or report.get("verified") is not True:
+        return False  # 422 REDACT_NOT_VERIFIED
+    if report.get("failed"):
+        return False  # 422 REDACT_ITEMS_FAILED: falló alguna censura
+    return True
+
+
+def term_forms(term):
+    t = term.encode()
+    return [t, term.encode("utf-16-be"), t.hex().encode(), term.encode("utf-16-be").hex().encode()]
+
+
+def full_dump(path):
+    """Todos los objetos del PDF descomprimidos (también los de object streams) y el
+    trailer: lo mismo que mostraría qpdf --qdf."""
+    doc = fitz.open(path)
+    parts = [doc.pdf_trailer().encode("latin-1", "replace")]
+    for x in range(1, doc.xref_length()):
+        parts.append(doc.xref_object(x, compressed=False).encode("latin-1", "replace"))
+        if doc.xref_is_stream(x):
+            parts.append(doc.xref_stream(x) or b"")
+    doc.close()
+    return b"\n".join(parts).lower()
+
+
+def term_anywhere(path, term=TERM):
+    raw = open(path, "rb").read().lower()
+    dump = full_dump(path)
+    return any(f.lower() in raw or f.lower() in dump for f in term_forms(term))
+
+
+# ==========================================
+# CONSTRUCCIÓN DE LOS PDF SINTÉTICOS
+# ==========================================
+def base_doc(pages=1):
+    """Página con el término visible en (72, 100) y un texto de control que debe quedar."""
+    doc = fitz.open()
+    for _ in range(pages):
+        page = doc.new_page()
+        page.insert_text((72, 100), f"Nombre: {TERM} fin", fontsize=12)
+        page.insert_text((72, 200), f"Texto de {CONTROL} que debe quedar", fontsize=12)
+    return doc
+
+
+def font_name(page):
+    return page.get_fonts()[0][4]
+
+
+def new_object(doc, source, stream=None):
+    xref = doc.get_new_xref()
+    doc.update_object(xref, source)
+    if stream is not None:
+        doc.update_stream(xref, stream)
+    return xref
+
+
+def append_contents(doc, page, *streams):
+    """Añade flujos al final de /Contents de la página."""
+    xrefs = [new_object(doc, "<<>>", s) for s in streams]
+    refs = " ".join(f"{x} 0 R" for x in page.get_contents() + xrefs)
+    doc.xref_set_key(page.xref, "Contents", f"[{refs}]")
+
+
+def set_resource(doc, page, key, value):
+    res = doc.xref_get_key(page.xref, "Resources")
+    if res[0] == "xref":
+        doc.xref_set_key(int(res[1].split()[0]), key, value)
+    else:
+        doc.xref_set_key(page.xref, f"Resources/{key}", value)
+
+
+def term_pixmap(gray=False):
+    """El término renderizado como imagen (600x120 px)."""
+    src = fitz.open()
+    page = src.new_page(width=300, height=60)
+    page.insert_text((10, 38), TERM, fontsize=28)
+    pix = page.get_pixmap(dpi=144, colorspace=fitz.csGRAY if gray else fitz.csRGB)
+    src.close()
+    return pix
+
+
+IMG = fitz.Rect(72, 80, 372, 140)  # donde se dibuja la imagen
+ZONE = fitz.Rect(120, 85, 330, 135)  # zona censurada, dentro de la imagen
+
+
+def item(page, rect, text=TERM, category="Personalizado", id_="i"):
+    return {"id": id_, "page": page, "text": text, "category": category, "rect": list(rect)}
+
+
+def manual(page, rect):
+    return item(page, rect, text="Zona manual", category=redact.MANUAL_CATEGORY, id_="m")
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="redact-leaks-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def save(self, doc, name="in.pdf", **kwargs):
+        path = os.path.join(self.dir, name)
+        doc.save(path, **kwargs)
+        doc.close()
+        return path
+
+    def search_items(self, path, pages=None, term=TERM):
+        """Hallazgos como los que envía el frontend tras /v1/redact/search."""
+        doc = fitz.open(path)
+        redact.flatten_document(doc)
+        items = [item(p.number, r, term, id_=f"{p.number}-{i}")
+                 for p in doc if pages is None or p.number in pages
+                 for i, r in enumerate(p.search_for(term))]
+        doc.close()
+        return items
+
+    def apply(self, path, items=None):
+        if items is None:
+            items = self.search_items(path)
+        out = os.path.join(self.dir, "out.pdf")
+        if os.path.exists(out):
+            os.remove(out)
+        report = redact.apply(path, out, items)
+        return report, out
+
+    def assertBlocked(self, report, out):
+        detail = "" if not os.path.exists(out) else (
+            f" (término en la salida: {term_anywhere(out)})")
+        self.assertFalse(server_delivers(report),
+                         f"se entregaría (200): {report}{detail}")
+
+    def assertDeliveredClean(self, report, out, control=True):
+        self.assertTrue(server_delivers(report), f"no se entrega: {report}")
+        self.assertFalse(term_anywhere(out), "el término sigue en la salida")
+        self.assertEqual(report.get("text_loss_pages"), [])
+        if control:
+            doc = fitz.open(out)
+            self.assertIn(CONTROL, "".join(p.get_text() for p in doc))
+            doc.close()
+
+
+# ==========================================
+# FUGAS: NO DEBEN ENTREGARSE
+# ==========================================
+class LeakTests(Base):
+    # --- 1. ' con el operando en otro flujo de /Contents, o flujo no analizable ---
+    def _quote(self, *streams):
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 400), CONTROL, fontsize=12)
+        append_contents(doc, page, *(s.replace(b"FN", font_name(page).encode()) for s in streams))
+        return self.save(doc)
+
+    def test_1_quote_operando_en_otro_flujo(self):
+        path = self._quote(f"BT /FN 12 Tf 14 TL 72 742 Td (Nombre) Tj ({TERM}) ".encode(),
+                           b"' (otra linea) ' ET")
+        self.assertBlocked(*self.apply(path))
+
+    def test_1_quote_flujo_no_analizable(self):
+        path = self._quote(f"BT /FN 12 Tf 14 TL 72 742 Td (Nombre) Tj ({TERM}) ' (otra linea) ' ET }}".encode())
+        self.assertBlocked(*self.apply(path))
+
+    # --- 2. Texto fuera del MediaBox o del CropBox ---
+    def test_2_fuera_del_mediabox(self):
+        doc = base_doc()
+        append_contents(doc, doc[0], f"BT /{font_name(doc[0])} 12 Tf 72 900 Td ({TERM}) Tj ET".encode())
+        self.assertBlocked(*self.apply(self.save(doc)))
+
+    def test_2_fuera_del_cropbox(self):
+        doc = base_doc()
+        append_contents(doc, doc[0], f"BT /{font_name(doc[0])} 12 Tf 72 30 Td ({TERM}) Tj ET".encode())
+        doc[0].set_cropbox(fitz.Rect(0, 0, 595, 700))
+        self.assertBlocked(*self.apply(self.save(doc)))
+
+    # --- 3. Adjuntos por /AF ---
+    def test_3_facturx_af_y_embeddedfiles_misma_filespec(self):
+        doc = base_doc()
+        ef = new_object(doc, "<</Type/EmbeddedFile/Subtype/text#2Fxml>>",
+                        f"<Invoice><Buyer>{TERM}</Buyer></Invoice>".encode())
+        fs = new_object(doc, f"<</Type/Filespec/F(factur-x.xml)/UF(factur-x.xml)"
+                             f"/AFRelationship/Data/EF<</F {ef} 0 R/UF {ef} 0 R>>>>")
+        doc.xref_set_key(doc.pdf_catalog(), "Names", f"<</EmbeddedFiles<</Names[(factur-x.xml) {fs} 0 R]>>>>")
+        doc.xref_set_key(doc.pdf_catalog(), "AF", f"[{fs} 0 R]")
+        self.assertBlocked(*self.apply(self.save(doc)))
+
+    def test_3_af_solo_en_el_catalogo(self):
+        doc = base_doc()
+        ef = new_object(doc, "<<>>", f"af {TERM}".encode())
+        fs = new_object(doc, f"<</Type/Filespec/F(datos.bin)/EF<</F {ef} 0 R>>>>")
+        doc.xref_set_key(doc.pdf_catalog(), "AF", f"[{fs} 0 R]")
+        self.assertBlocked(*self.apply(self.save(doc)))
+
+    # --- 4. Capas OCG ---
+    def test_4_texto_en_capa_off(self):
+        doc = base_doc()
+        off = doc.add_ocg("oculta", on=False)
+        doc[0].insert_text((72, 650), f"Capa off {TERM}", fontsize=12, oc=off)
+        self.assertBlocked(*self.apply(self.save(doc)))
+
+    def test_4_nombre_de_capa(self):
+        doc = base_doc()
+        doc.add_ocg(f"Capa {TERM}", on=True)
+        self.assertBlocked(*self.apply(self.save(doc)))
+
+    # --- 5. Estructuras con texto libre ---
+    def _structure(self, build):
+        doc = base_doc()
+        build(doc)
+        return self.apply(self.save(doc))
+
+    def test_5_names_dests(self):
+        def build(doc):
+            dest = new_object(doc, f"[{doc[0].xref} 0 R /XYZ 0 0 0]")
+            doc.xref_set_key(doc.pdf_catalog(), "Names", f"<</Dests<</Names[({TERM}) {dest} 0 R]>>>>")
+        self.assertBlocked(*self._structure(build))
+
+    def test_5_aa_de_pagina_uri(self):
+        def build(doc):
+            uri = new_object(doc, f"<</S/URI/URI(https://x.es/{TERM})>>")
+            doc.xref_set_key(doc[0].xref, "AA", f"<</O {uri} 0 R>>")
+        self.assertBlocked(*self._structure(build))
+
+    def test_5_openaction_uri(self):
+        def build(doc):
+            uri = new_object(doc, f"<</S/URI/URI(https://x.es/{TERM})>>")
+            doc.xref_set_key(doc.pdf_catalog(), "OpenAction", f"{uri} 0 R")
+        self.assertBlocked(*self._structure(build))
+
+    def test_5_pieceinfo(self):
+        def build(doc):
+            doc.xref_set_key(doc[0].xref, "PieceInfo", f"<</App<</Private({TERM})>>>>")
+        self.assertBlocked(*self._structure(build))
+
+    def test_5_marcador_neutro_con_uri(self):
+        def build(doc):
+            doc.set_toc([[1, "Neutro", 1]])
+            doc.set_toc_item(0, kind=fitz.LINK_URI, uri=f"https://x.es/{TERM}")
+        self.assertBlocked(*self._structure(build))
+
+    def test_5_structtree_alt_actualtext(self):
+        def build(doc):
+            se = new_object(doc, f"<</Type/StructElem/S/Figure/Alt({TERM})/ActualText({TERM})>>")
+            st = new_object(doc, f"<</Type/StructTreeRoot/K {se} 0 R>>")
+            doc.xref_set_key(doc.pdf_catalog(), "StructTreeRoot", f"{st} 0 R")
+        self.assertBlocked(*self._structure(build))
+
+    def test_5_structtree_en_utf16_hex(self):
+        def build(doc):
+            alt = "FEFF" + TERM.encode("utf-16-be").hex().upper()
+            se = new_object(doc, f"<</Type/StructElem/S/Figure/Alt<{alt}>>>")
+            st = new_object(doc, f"<</Type/StructTreeRoot/K {se} 0 R>>")
+            doc.xref_set_key(doc.pdf_catalog(), "StructTreeRoot", f"{st} 0 R")
+        self.assertBlocked(*self._structure(build))
+
+    def test_5_variante_con_guiones_y_espacios(self):
+        def build(doc):
+            doc.xref_set_key(doc[0].xref, "PieceInfo", "<</App<</Private(SECRETO 77-31)>>>>")
+        self.assertBlocked(*self._structure(build))
+
+    def test_5_pagelabels(self):
+        def build(doc):
+            doc.set_page_labels([{"startpage": 0, "prefix": f"{TERM}-", "style": "D"}])
+        self.assertBlocked(*self._structure(build))
+
+    def test_5_threads(self):
+        def build(doc):
+            bead = new_object(doc, "<<>>")
+            thread = new_object(doc, f"<</Type/Thread/I<</Title({TERM})>>/F {bead} 0 R>>")
+            doc.update_object(bead, f"<</T {thread} 0 R/P {doc[0].xref} 0 R/R[0 0 10 10]/N {bead} 0 R/V {bead} 0 R>>")
+            doc.xref_set_key(doc.pdf_catalog(), "Threads", f"[{thread} 0 R]")
+        self.assertBlocked(*self._structure(build))
+
+    # --- 7. Rectángulos inválidos ---
+    def _bad_rect(self, transform):
+        path = self.save(base_doc())
+        items = self.search_items(path)
+        r = items[0]["rect"]
+        items[0]["rect"] = transform(r)
+        return self.apply(path, items)
+
+    def test_7_rect_invertido(self):
+        self.assertBlocked(*self._bad_rect(lambda r: [r[2], r[3], r[0], r[1]]))
+
+    def test_7_rect_altura_cero(self):
+        self.assertBlocked(*self._bad_rect(lambda r: [r[0], r[1], r[2], r[1]]))
+
+    def test_7_rect_fuera_de_la_pagina(self):
+        self.assertBlocked(*self._bad_rect(lambda r: [700, 900, 750, 950]))
+
+    # --- 8. Censuras fallidas ---
+    def test_8_una_fallida_y_una_buena(self):
+        path = self.save(base_doc())
+        items = self.search_items(path) + [item(9, [72, 90, 200, 110], id_="mala")]
+        self.assertBlocked(*self.apply(path, items))
+
+    def test_8_pagina_negativa(self):
+        path = self.save(base_doc(pages=2))
+        items = self.search_items(path, pages={0})
+        items.append(dict(items[0], id="neg", page=-1))  # -1 no es "la última página"
+        self.assertBlocked(*self.apply(path, items))
+
+    # --- Decisión de Luis: una aparición visible desmarcada + una oculta ---
+    def test_desmarcada_visible_mas_oculta(self):
+        doc = base_doc(pages=2)
+        append_contents(doc, doc[1], f"BT /{font_name(doc[1])} 12 Tf 72 30 Td ({TERM}) Tj ET".encode())
+        doc[1].set_cropbox(fitz.Rect(0, 0, 595, 700))
+        path = self.save(doc)
+        # Se censura la página 0 y se desmarca la aparición visible de la 1.
+        self.assertBlocked(*self.apply(path, self.search_items(path, pages={0})))
+
+
+# ==========================================
+# CORRECTOS: SE ENTREGAN CON EL RESULTADO DE SIEMPRE
+# ==========================================
+class CorrectTests(Base):
+    def test_tj_basico(self):
+        self.assertDeliveredClean(*self.apply(self.save(base_doc())))
+
+    def test_pagina_girada(self):
+        """Los hallazgos llegan sin girar (search_for): no se dan por fuera de la página."""
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((400, 800), f"{TERM} abajo", fontsize=12)
+        page.insert_text((72, 200), CONTROL, fontsize=12)
+        page.set_rotation(90)
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_cropbox_desplazado(self):
+        doc = base_doc()
+        doc[0].set_cropbox(fitz.Rect(50, 50, 545, 792))
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_quote_y_dobles_comillas_en_un_flujo(self):
+        doc = base_doc()
+        append_contents(doc, doc[0], f"BT /{font_name(doc[0])} 12 Tf 14 TL 72 300 Td (linea) ' 1 0 ({TERM} q1) \" ET".encode())
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_texto_partido_y_tj(self):
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 200), CONTROL, fontsize=12)
+        append_contents(doc, page, f"BT /{font_name(page)} 12 Tf 72 742 Td (SECR) Tj (ETO) Tj [(77) -20 (31)] TJ ET".encode())
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_capa_ocr_invisible(self):
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 100), f"Nombre {TERM}", fontsize=12, render_mode=3)
+        page.insert_text((72, 200), CONTROL, fontsize=12)
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_actualtext(self):
+        doc = base_doc()
+        append_contents(doc, doc[0], f"/Span <</ActualText ({TERM})>> BDC BT /{font_name(doc[0])} 12 Tf 72 300 Td (XXXX) Tj ET EMC".encode())
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_type3_sin_tounicode(self):
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 300), CONTROL, fontsize=12)
+        chars = sorted(set(TERM))
+        procs = {c: new_object(doc, "<<>>", b"600 0 0 0 500 700 d1 0 0 500 700 re f") for c in chars}
+        first, last = ord(chars[0]), ord(chars[-1])
+        font = new_object(doc, (
+            "<</Type/Font/Subtype/Type3/FontBBox[0 0 600 700]/FontMatrix[0.001 0 0 0.001 0 0]"
+            f"/CharProcs<<{' '.join(f'/g{ord(c)} {x} 0 R' for c, x in procs.items())}>>"
+            f"/Encoding<</Type/Encoding/Differences[{' '.join(f'{ord(c)} /g{ord(c)}' for c in chars)}]>>"
+            f"/FirstChar {first}/LastChar {last}/Widths[{' '.join('600' for _ in range(first, last + 1))}]"
+            "/Resources<<>>>>"))
+        set_resource(doc, page, "Font", f"<</F3 {font} 0 R /{font_name(page)} {page.get_fonts()[0][0]} 0 R>>")
+        append_contents(doc, page, f"BT /F3 20 Tf 72 720 Td ({TERM}) Tj ET".encode())
+        path = self.save(doc)
+        self.assertDeliveredClean(*self.apply(path, [manual(0, fitz.Rect(60, 105, 400, 130))]))
+
+    def test_xobject_en_dos_paginas_ambas(self):
+        doc = fitz.open()
+        src = fitz.open()
+        src.new_page(width=300, height=50).insert_text((10, 30), f"Ref {TERM}", fontsize=12)
+        for _ in range(2):
+            page = doc.new_page()
+            page.show_pdf_page(fitz.Rect(72, 80, 372, 130), src, 0)
+            page.insert_text((72, 300), CONTROL, fontsize=12)
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_desmarcada_visible_sola(self):
+        """Decisión de Luis: una aparición visible que el usuario desmarca se entrega."""
+        path = self.save(base_doc(pages=2))
+        report, out = self.apply(path, self.search_items(path, pages={0}))
+        self.assertTrue(server_delivers(report), report)
+        doc = fitz.open(out)
+        self.assertNotIn(TERM, doc[0].get_text())
+        self.assertIn(TERM, doc[1].get_text())
+        doc.close()
+
+    def test_xobject_en_dos_paginas_solo_la_primera(self):
+        doc = fitz.open()
+        src = fitz.open()
+        src.new_page(width=300, height=50).insert_text((10, 30), f"Ref {TERM}", fontsize=12)
+        for _ in range(2):
+            page = doc.new_page()
+            page.show_pdf_page(fitz.Rect(72, 80, 372, 130), src, 0)
+        path = self.save(doc)
+        report, out = self.apply(path, self.search_items(path, pages={0}))
+        self.assertTrue(server_delivers(report), report)
+        doc = fitz.open(out)
+        self.assertNotIn(TERM, doc[0].get_text())
+        self.assertIn(TERM, doc[1].get_text())
+        doc.close()
+
+    def test_anotaciones_freetext_nota_oculta(self):
+        doc = base_doc()
+        page = doc[0]
+        page.add_freetext_annot(fitz.Rect(72, 400, 300, 430), f"Nota {TERM}")
+        page.add_text_annot((400, 400), f"comentario {TERM}")
+        hidden = page.add_freetext_annot(fitz.Rect(72, 450, 300, 480), f"Oculta {TERM}")
+        hidden.set_flags(fitz.PDF_ANNOT_IS_HIDDEN)
+        hidden.update()
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_formulario_v_dv_nombre_xfa(self):
+        doc = base_doc()
+        page = doc[0]
+        for name, value, y in (("dni", TERM, 500), (f"campo_{TERM}", "neutro", 540)):
+            w = fitz.Widget()
+            w.field_name, w.field_type = name, fitz.PDF_WIDGET_TYPE_TEXT
+            w.rect, w.field_value = fitz.Rect(72, y, 300, y + 20), value
+            page.add_widget(w)
+        for w in page.widgets():
+            if w.field_name == "dni":
+                doc.xref_set_key(w.xref, "DV", f"({TERM})")
+        xfa = new_object(doc, "<<>>", f"<xfa><dni>{TERM}</dni></xfa>".encode())
+        doc.xref_set_key(doc.pdf_catalog(), "AcroForm/XFA", f"{xfa} 0 R")
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_javascript_y_enlaces_de_pagina(self):
+        doc = base_doc()
+        js = new_object(doc, f"<</S/JavaScript/JS(app.alert('{TERM}'))>>")
+        doc.xref_set_key(doc.pdf_catalog(), "OpenAction", f"{js} 0 R")
+        js2 = new_object(doc, f"<</S/JavaScript/JS(var a='{TERM}';)>>")
+        doc.xref_set_key(doc.pdf_catalog(), "Names", f"<</JavaScript<</Names[(doc) {js2} 0 R]>>>>")
+        doc[0].insert_link({"kind": fitz.LINK_URI, "from": fitz.Rect(72, 600, 200, 620), "uri": f"https://x.es/?dni={TERM}"})
+        doc[0].insert_link({"kind": fitz.LINK_LAUNCH, "from": fitz.Rect(72, 630, 200, 650), "file": f"{TERM}.pdf"})
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_info_xmp_metadata_de_pagina(self):
+        doc = base_doc()
+        doc.set_metadata({"author": TERM, "title": f"Exp {TERM}"})
+        info = int(doc.xref_get_key(-1, "Info")[1].split()[0])
+        doc.xref_set_key(info, "Empresa", f"({TERM})")
+        doc.set_xml_metadata(f"<x:xmpmeta xmlns:x='adobe:ns:meta/'><dc>{TERM}</dc></x:xmpmeta>")
+        meta = new_object(doc, "<</Type/Metadata/Subtype/XML>>", f"<x>{TERM}</x>".encode())
+        doc.xref_set_key(doc[0].xref, "Metadata", f"{meta} 0 R")
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_marcador_con_el_termino(self):
+        doc = base_doc()
+        doc.set_toc([[1, f"Parte {TERM}", 1], [2, "hijo", 1]])
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_adjuntos_y_fileattachment(self):
+        doc = base_doc()
+        doc.embfile_add(f"{TERM}.txt", f"dato {TERM}".encode(), filename=f"{TERM}.txt", desc=TERM)
+        doc[0].add_file_annot((400, 300), f"adj {TERM}".encode(), f"f_{TERM}.txt", desc=TERM)
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_miniatura(self):
+        doc = base_doc()
+        thumb = new_object(doc, "<</Type/XObject/Subtype/Image/Width 11/Height 1/ColorSpace/DeviceGray/BitsPerComponent 8>>",
+                           TERM.encode())
+        doc.xref_set_key(doc[0].xref, "Thumb", f"{thumb} 0 R")
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_redact_pendiente_de_acrobat(self):
+        doc = base_doc()
+        doc[0].add_redact_annot(doc[0].search_for(TERM)[0], text=TERM)
+        self.assertDeliveredClean(*self.apply(self.save(doc), []))
+
+    # --- Imágenes: bajo la zona queda un único valor de píxel ---
+    def assertZoneWiped(self, out, page_no=0, zone=ZONE):
+        doc = fitz.open(out)
+        page = doc[page_no]
+        checked = 0
+        for info in page.get_image_info(xrefs=True):
+            box = fitz.Rect(info["bbox"])
+            inter = box & zone
+            if inter.is_empty:
+                continue
+            xrefs = [info["xref"]]
+            smask = doc.xref_get_key(info["xref"], "SMask")[1]
+            if smask.endswith(" 0 R"):
+                xrefs.append(int(smask.split()[0]))
+            for x in xrefs:
+                pix = fitz.Pixmap(doc, x)
+                sx, sy = pix.width / box.width, pix.height / box.height
+                values = {pix.pixel(px, py)
+                          for py in range(int((inter.y0 - box.y0) * sy) + 2, int((inter.y1 - box.y0) * sy) - 2, 2)
+                          for px in range(int((inter.x0 - box.x0) * sx) + 2, int((inter.x1 - box.x0) * sx) - 2, 2)}
+                self.assertEqual(len(values), 1, f"imagen {x}: {len(values)} valores bajo la zona")
+                checked += 1
+        doc.close()
+        return checked
+
+    def _image_page(self):
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 300), CONTROL, fontsize=12)
+        return doc, page
+
+    def test_imagen_jpeg(self):
+        doc, page = self._image_page()
+        page.insert_image(IMG, stream=term_pixmap().tobytes("jpg"))
+        report, out = self.apply(self.save(doc), [manual(0, ZONE)])
+        self.assertDeliveredClean(report, out)
+        self.assertEqual(self.assertZoneWiped(out), 1)
+
+    def test_imagen_smask(self):
+        doc, page = self._image_page()
+        gray = term_pixmap(gray=True)
+        black = fitz.Pixmap(fitz.csRGB, gray.irect, False)
+        black.clear_with(0)
+        img = fitz.Pixmap(black, 1)
+        img.set_alpha(bytes(255 - b for b in gray.samples))
+        page.insert_image(IMG, pixmap=img)
+        report, out = self.apply(self.save(doc), [manual(0, ZONE)])
+        self.assertDeliveredClean(report, out)
+        self.assertEqual(self.assertZoneWiped(out), 2)  # color y SMask
+
+    def test_imagen_imagemask_1bit(self):
+        doc, page = self._image_page()
+        gray = term_pixmap(gray=True)
+        w, h = gray.width, gray.height
+        stride = (w + 7) // 8
+        bits = bytearray(stride * h)
+        for y in range(h):
+            for x in range(w):
+                if gray.pixel(x, y)[0] < 128:
+                    bits[y * stride + x // 8] |= 0x80 >> (x % 8)
+        im = new_object(doc, f"<</Type/XObject/Subtype/Image/Width {w}/Height {h}/ImageMask true/BitsPerComponent 1/Decode[1 0]>>",
+                        bytes(bits))
+        set_resource(doc, page, "XObject", f"<</Im9 {im} 0 R>>")
+        append_contents(doc, page, b"q 0 g 300 0 0 60 72 702 cm /Im9 Do Q")
+        report, out = self.apply(self.save(doc), [manual(0, ZONE)])
+        self.assertDeliveredClean(report, out)
+        self.assertEqual(self.assertZoneWiped(out), 1)
+
+    def test_imagen_en_linea(self):
+        doc, page = self._image_page()
+        gray = term_pixmap(gray=True)
+        append_contents(doc, page, (f"q 300 0 0 60 72 702 cm BI /W {gray.width} /H {gray.height} /CS /G /BPC 8 /F /AHx ID\n").encode()
+                        + gray.samples.hex().upper().encode() + b">\nEI Q")
+        report, out = self.apply(self.save(doc), [manual(0, ZONE)])
+        self.assertDeliveredClean(report, out)
+        out_doc = fitz.open(out)
+        blocks = [b for b in out_doc[0].get_text("dict")["blocks"] if b["type"] == 1]
+        self.assertEqual(len(blocks), 1)
+        pix, box = fitz.Pixmap(blocks[0]["image"]), fitz.Rect(blocks[0]["bbox"])
+        sx, sy = pix.width / box.width, pix.height / box.height
+        values = {pix.pixel(x, y)
+                  for y in range(int((ZONE.y0 - box.y0) * sy) + 2, int((ZONE.y1 - box.y0) * sy) - 2, 2)
+                  for x in range(int((ZONE.x0 - box.x0) * sx) + 2, int((ZONE.x1 - box.x0) * sx) - 2, 2)}
+        out_doc.close()
+        self.assertEqual(len(values), 1)
+
+    def test_imagen_en_xobject_compartido(self):
+        doc = fitz.open()
+        src = fitz.open()
+        sp = src.new_page(width=300, height=60)
+        sp.insert_image(sp.rect, stream=term_pixmap().tobytes("png"))
+        for _ in range(2):
+            page = doc.new_page()
+            page.show_pdf_page(IMG, src, 0)
+            page.insert_text((72, 300), CONTROL, fontsize=12)
+        report, out = self.apply(self.save(doc), [manual(0, ZONE)])
+        self.assertTrue(server_delivers(report), report)
+        self.assertEqual(self.assertZoneWiped(out, 0), 1)
+        # La página 1 no se censuró: conserva su imagen.
+        out_doc = fitz.open(out)
+        self.assertEqual(len(out_doc[1].get_images()), 1)
+        out_doc.close()
+
+    # --- Patrón con texto ---
+    def _pattern_doc(self):
+        doc, page = self._image_page()
+        helv = new_object(doc, "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>")
+        pat = new_object(doc, f"<</Type/Pattern/PatternType 1/PaintType 1/TilingType 1/BBox[0 0 300 40]"
+                              f"/XStep 300/YStep 40/Resources<</Font<</H {helv} 0 R>>>>>>",
+                         f"BT /H 14 Tf 5 15 Td ({TERM}) Tj ET".encode())
+        set_resource(doc, page, "Pattern", f"<</P1 {pat} 0 R>>")
+        append_contents(doc, page, b"q /Pattern cs /P1 scn 72 702 300 40 re f Q")
+        return self.save(doc)
+
+    def test_patron_cubierto_entero(self):
+        self.assertDeliveredClean(*self.apply(self._pattern_doc(), [manual(0, fitz.Rect(72, 100, 372, 140))]))
+
+    def test_patron_cubierto_en_parte_no_se_entrega(self):
+        report, out = self.apply(self._pattern_doc(), [manual(0, fitz.Rect(72, 100, 250, 140))])
+        self.assertBlocked(report, out)
+
+    # --- Revisiones incrementales, huérfanos y object streams ---
+    def test_revision_incremental(self):
+        path = os.path.join(self.dir, "in.pdf")
+        doc = base_doc()
+        doc.set_metadata({"author": TERM})
+        doc.save(path)
+        doc.close()
+        doc = fitz.open(path)
+        doc[0].add_redact_annot(doc[0].search_for(TERM)[0])
+        doc[0].apply_redactions()
+        doc.set_metadata({"author": "otro"})
+        doc.save(path, incremental=True, encryption=0)
+        doc.close()
+        self.assertIn(TERM.encode(), open(path, "rb").read())  # la revisión antigua está en la entrada
+        self.assertDeliveredClean(*self.apply(path, []))
+
+    def test_huerfano_y_object_streams(self):
+        doc = base_doc()
+        new_object(doc, f"<</Huerfano ({TERM})>>")
+        self.assertDeliveredClean(*self.apply(self.save(doc, use_objstms=1, garbage=0)))
+
+    def test_busqueda_cruza_saltos_de_linea(self):
+        import json
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 100), "Demandante: Juan", fontsize=12)
+        page.insert_text((72, 115), "Perez Gomez", fontsize=12)
+        path = self.save(doc)
+        patterns = os.path.join(self.dir, "p.json")
+        results = os.path.join(self.dir, "r.json")
+        with open(patterns, "w", encoding="utf-8") as f:
+            json.dump({"Nombre": r"Juan\s+Perez"}, f)
+        redact.search(path, patterns, results)
+        with open(results, encoding="utf-8") as f:
+            rects = [fitz.Rect(r["rect"]) for r in json.load(f)["results"]]
+        self.assertEqual(len(rects), 2)  # "Juan" en una línea y "Perez" en la siguiente
+        self.assertEqual(sorted(round(r.y0) // 10 for r in rects), [8, 10])  # líneas en y=100 y y=115
+
+
+# ==========================================
+# HUECOS CONOCIDOS (fase posterior)
+# ==========================================
+class KnownGapTests(Base):
+    @unittest.expectedFailure
+    def test_6_firma_vectorial_cubierta_en_parte(self):
+        """Hallazgo 6: un trazo que entra y sale de la zona queda entero bajo el negro."""
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 300), CONTROL, fontsize=12)
+        shape = page.new_shape()
+        shape.draw_polyline([fitz.Point(60 + i * 8, 110 + (15 if i % 2 else -15)) for i in range(40)])
+        shape.finish(color=(0, 0, 1), width=1.5)
+        shape.commit()
+        zone = fitz.Rect(100, 90, 300, 130)
+        report, out = self.apply(self.save(doc), [manual(0, zone)])
+        out_doc = fitz.open(out) if os.path.exists(out) else None
+        inside = 0 if out_doc is None else sum(
+            1 for d in out_doc[0].get_drawings() if d.get("color") == (0.0, 0.0, 1.0)
+            for it in d["items"] for p in it[1:] if isinstance(p, fitz.Point) and zone.contains(p))
+        self.assertFalse(server_delivers(report) and inside > 0, f"{inside} puntos del trazo bajo la zona")
+
+
+if __name__ == "__main__":
+    unittest.main()

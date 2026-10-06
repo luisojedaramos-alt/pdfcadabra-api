@@ -313,6 +313,48 @@ def chars_in_zones(page, zones):
     return False
 
 
+_ALL_TEXT_FLAGS = fitz.TEXTFLAGS_WORDS & ~fitz.TEXT_MEDIABOX_CLIP
+
+
+def _word_key(word):
+    x0, y0, x1, y1, text, *_ = word
+    return (text, round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1))
+
+
+def hidden_page_text(page_visible, page_all):
+    """Texto de la página que no se ve: fuera del CropBox o del MediaBox, desplazado fuera
+    de la página o en una capa OCG apagada. `page_all` es la misma página extraída sin
+    recorte y con todas las capas visibles (documento sin /OCProperties).
+
+    Cada palabra visible (misma posición y texto) descuenta una de `page_all`; lo que queda
+    es el texto oculto, en el orden de la página.
+    """
+    visible = Counter(_word_key(w) for w in page_visible.get_text("words", clip=page_visible.rect))
+    hidden = []
+    for w in page_all.get_text("words", clip=fitz.INFINITE_RECT(), flags=_ALL_TEXT_FLAGS):
+        key = _word_key(w)
+        if visible[key]:
+            visible[key] -= 1
+        else:
+            hidden.append(w[4])
+    return " ".join(hidden)
+
+
+def open_all_layers(path):
+    """`path` abierto con todas las capas visibles: sin /OCProperties MuPDF no oculta ningún
+    contenido opcional (activar las capas no basta: un OCMD /AllOff se ocultaría). Hay que
+    reabrirlo (cambiar la clave en memoria no basta), así que se guarda una copia junto a
+    `path`, en disco y no en memoria. Devuelve (documento, ruta de la copia o None)."""
+    doc = fitz.open(path)
+    if doc.xref_get_key(doc.pdf_catalog(), "OCProperties")[0] == "null":
+        return doc, None
+    copy_path = path + ".capas.pdf"
+    doc.xref_set_key(doc.pdf_catalog(), "OCProperties", "null")
+    doc.save(copy_path)
+    doc.close()
+    return fitz.open(copy_path), copy_path
+
+
 def text_under_zones(words, zones):
     """Texto bajo cada zona (palabras con el centro dentro), una cadena por zona."""
     index = ZoneIndex(zones)
@@ -553,18 +595,25 @@ def _decode_any(data):
 def verify_redaction(path, zones_by_page, terms):
     """Busca de nuevo en el PDF de salida. Devuelve la lista de sitios con fugas.
 
-    - Texto de página: ningún carácter puede tener el centro dentro de una zona censurada
-      (geometría: una aparición que el usuario decidió no censurar no es una fuga).
+    - Texto de página visible: ningún carácter puede tener el centro dentro de una zona
+      censurada (geometría: una aparición visible que el usuario decidió no censurar no es
+      una fuga).
+    - Texto de página oculto (fuera del CropBox o del MediaBox, desplazado fuera de la
+      página o en una capa apagada): no puede aparecer ningún término censurado. El
+      usuario no lo ha visto, así que no ha podido decidir dejarlo.
     - Campos, anotaciones, enlaces, metadatos (Info y XMP), marcadores y adjuntos: no
       puede aparecer ningún término censurado.
     Nunca devuelve los términos: el resultado va al log.
     """
     leaks = set()
     doc = fitz.open(path)
+    all_layers, copy_path = open_all_layers(path)
     try:
         for page in doc:
             if chars_in_zones(page, zones_by_page.get(page.number)):
                 leaks.add("page_text")
+            if _contains_term(hidden_page_text(page, all_layers[page.number]), terms):
+                leaks.add("hidden_text")
             for w in page.widgets():
                 if any(_contains_term(v, terms) for v in (w.field_value, w.field_label, w.field_name)):
                     leaks.add("form_fields")
@@ -598,6 +647,9 @@ def verify_redaction(path, zones_by_page, terms):
                 leaks.add("attachments")
     finally:
         doc.close()
+        all_layers.close()
+        if copy_path:
+            os.remove(copy_path)
     return sorted(leaks)
 
 

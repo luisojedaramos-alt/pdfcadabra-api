@@ -267,8 +267,10 @@ class Fallo2OperadorComillaArchivo7(unittest.TestCase):
         for word in ("Documento", "comilla", "doble"):
             self.assertEqual(doc_in[0].search_for(word), doc_out[0].search_for(word))
 
-    def test_si_se_pierde_texto_se_avisa(self):
-        """Sin la reescritura de ' (el fallo 2), el informe marca la página."""
+    def test_sin_reescritura_no_se_entrega(self):
+        """Sin la reescritura de ' (el fallo 2), MuPDF saca el texto de la página sin borrar
+        el DNI (sigue en el flujo, fuera de la página): la verificación no lo entrega.
+        Antes se entregaba con X-Redact-Text-Loss (auditoría 2026-10-07, hallazgo 1)."""
         src, out = tmp_path(self, "in.pdf"), tmp_path(self, "out.pdf")
         make_quote_pdf(src)
         real = redact.normalize_quote_operators
@@ -277,8 +279,9 @@ class Fallo2OperadorComillaArchivo7(unittest.TestCase):
             report = self._apply_dni(src, out)
         finally:
             redact.normalize_quote_operators = real
-        self.assertTrue(report["verified"])
-        self.assertEqual(report["text_loss_pages"], [1])
+        self.assertFalse(report["verified"])
+        self.assertIn("hidden_text", report["leaks"])
+        self.assertFalse(os.path.exists(out))
 
 
 def make_xref_gap_pdf(path):

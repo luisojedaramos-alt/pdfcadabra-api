@@ -59,8 +59,12 @@
   metadatos (Info y XMP), marcadores o adjuntos, o queda algún carácter dentro de una
   zona censurada, redact.py borra la salida y `server.js` responde 422
   `REDACT_NOT_VERIFIED` sin enviar nada (también si falta el informe). En el texto de
-  página se mira la geometría y no el término: el usuario puede desmarcar una aparición.
-  Al log solo van los sitios (`form_fields`, `outline`...), nunca los términos.
+  página visible se mira la geometría y no el término: el usuario puede desmarcar una
+  aparición visible. Decisión de Luis (2026-10-07): el texto oculto (fuera del CropBox o del
+  MediaBox, desplazado fuera de la página o en una capa OCG apagada) nunca puede contener un
+  término, sin contar apariciones (`hidden_text`): se extrae con clip infinito y sin
+  `/OCProperties` (copia `<salida>.capas.pdf`, que se borra al terminar) y se descuentan las
+  palabras visibles. Al log solo van los sitios (`form_fields`, `outline`...), nunca los términos.
 - `scrub(hidden_text=False)`: se conserva la capa de texto invisible de un OCR (si no, un
   escaneo deja de poder buscarse); bajo las zonas la borra `apply_redactions`.
 - Texto conservado: se comparan las palabras (también las de la capa OCR) fuera de las zonas antes y después;

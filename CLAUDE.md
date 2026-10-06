@@ -73,6 +73,10 @@
 - Censuras fallidas (`failed` del informe, p. ej. página inexistente): si falla CUALQUIERA,
   `server.js` responde 422 `REDACT_ITEMS_FAILED` con la lista y no envía nada (desde
   2026-10-07; antes, con fallos parciales, se enviaba con `X-Redact-Warnings`, que ya no se usa).
+  `item_zone` da por fallida la censura con página negativa o inexistente y con un
+  rectángulo invertido, vacío o que no toca la página (MuPDF los aceptaba sin tapar nada).
+  Los rectángulos llegan sin girar, como los da `search_for`: se comparan con
+  `page.rect * page.derotation_matrix`. Uno que sale en parte de la página sí vale.
 - `scrub(hidden_text=False)`: se conserva la capa de texto invisible de un OCR (si no, un
   escaneo deja de poder buscarse); bajo las zonas la borra `apply_redactions`.
 - Texto conservado: se comparan las palabras (también las de la capa OCR) fuera de las zonas antes y después;

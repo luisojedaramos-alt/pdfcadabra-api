@@ -1,5 +1,6 @@
 import bisect
 import json
+import math
 import os
 import re
 import struct
@@ -927,6 +928,30 @@ def search(input_path, patterns_path, results_path):
         json.dump({"results": results, "errors": errors}, f)
 
 
+def item_zone(doc, item):
+    """(página, Rect) de un hallazgo; ValueError si no se puede censurar tal cual.
+
+    Un rectángulo invertido o vacío no tapa nada aunque MuPDF lo acepte, y uno fuera de la
+    página tampoco: se dan por censura fallida (y server.js no entrega nada). Tampoco vale
+    una página negativa (en Python, -1 sería la última). Los hallazgos llegan en
+    coordenadas de la página sin girar, como los da search_for.
+    """
+    number = item["page"]
+    if not isinstance(number, int) or isinstance(number, bool) or not 0 <= number < doc.page_count:
+        raise ValueError(f"page {number} not in document")
+    page = doc[number]
+    coords = [float(v) for v in item["rect"]]
+    if len(coords) != 4 or not all(math.isfinite(v) for v in coords):
+        raise ValueError("rect no válido")
+    x0, y0, x1, y1 = coords
+    if x0 >= x1 or y0 >= y1:
+        raise ValueError("rect invertido o vacío")
+    rect = fitz.Rect(coords)
+    if not rect.intersects(page.rect * page.derotation_matrix):
+        raise ValueError("rect fuera de la página")
+    return page, rect
+
+
 def apply(input_path, output_path, items):
     """Censura, limpia y verifica. Devuelve el informe que lee server.js.
 
@@ -955,8 +980,7 @@ def apply(input_path, output_path, items):
     # Blindaje anticaídas con registro de fallos
     for item in items:
         try:
-            page = doc[item["page"]]
-            rect = fitz.Rect(item["rect"])
+            page, rect = item_zone(doc, item)
             # Forzamos opacidad absoluta en el relleno
             page.add_redact_annot(rect, fill=(0, 0, 0))
             zones_by_page.setdefault(page.number, []).append(rect)

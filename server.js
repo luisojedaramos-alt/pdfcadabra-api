@@ -347,21 +347,17 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
             const applied = report.applied || 0;
             const totalRequested = applied + failed.length;
 
-            // CRÍTICO: si se pidieron censuras y NINGUNA se aplicó, el PDF de salida
-            // es idéntico al original sin censurar. Nunca lo enviamos como si fuera un éxito.
-            if (totalRequested > 0 && applied === 0) {
-                console.error(`[Redact] Fallaron todas las censuras (${failed.length}/${totalRequested}):`, failedMessages(failed));
+            // CRÍTICO: si falla CUALQUIER censura, lo que debía tapar sigue en el PDF. No se
+            // envía nada, tampoco el resto ya censurado (antes, con fallos parciales, se
+            // enviaba con X-Redact-Warnings).
+            if (failed.length > 0) {
+                console.error(`[Redact] Fallaron ${failed.length}/${totalRequested} censuras:`, failedMessages(failed));
                 secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
                 return res.status(422).json({
-                    error: 'No se pudo aplicar ninguna censura. El documento no se ha modificado y no ha sido enviado.',
+                    code: 'REDACT_ITEMS_FAILED',
+                    error: `No se pudieron aplicar ${failed.length} de ${totalRequested} censuras. No se ha descargado nada.`,
                     failed
                 });
-            }
-
-            // Si hay fallos parciales, los inyectamos en las cabeceras HTTP
-            if (failed.length > 0) {
-                console.warn(`[Redact] ${failed.length} censuras no se pudieron aplicar:`, failedMessages(failed));
-                res.setHeader('X-Redact-Warnings', encodeURIComponent(JSON.stringify(failed)));
             }
 
             // Páginas (desde 1) que han perdido texto fuera de las zonas censuradas: el

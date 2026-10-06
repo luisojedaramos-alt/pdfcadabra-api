@@ -1,5 +1,6 @@
 // /v1/redact/apply y la verificación final de redact.py: sin informe o con
-// verified !== true no se envía el documento (422 REDACT_NOT_VERIFIED), y las páginas con
+// verified !== true no se envía el documento (422 REDACT_NOT_VERIFIED), si falla alguna censura
+// tampoco (422 REDACT_ITEMS_FAILED), y las páginas con
 // texto perdido fuera de las zonas censuradas llegan en X-Redact-Text-Loss. redact.py se
 // simula sustituyendo execFile antes de cargar server.js (como en compress-timeout.test.js).
 const test = require('node:test');
@@ -74,4 +75,24 @@ test('verificado sin pérdidas: sin cabecera de aviso', async (t) => {
     assert.equal(res.status, 200);
     assert.deepEqual(body, OUTPUT);
     assert.equal(res.headers.get('x-redact-text-loss'), null);
+});
+
+test('una censura fallida (de varias): 422 REDACT_ITEMS_FAILED, sin documento y sin temporales', async (t) => {
+    const failed = [{ id: 'b', error: 'page 9 not in document' }];
+    report = { success: true, verified: true, applied: 1, failed, text_loss_pages: [] };
+    const { res, body } = await apply(t);
+    assert.equal(res.status, 422);
+    const json = JSON.parse(body.toString());
+    assert.equal(json.code, 'REDACT_ITEMS_FAILED');
+    assert.deepEqual(json.failed, failed);
+    assert.ok(!body.includes(OUTPUT));
+    assert.equal(res.headers.get('x-redact-warnings'), null);
+    assert.equal(fs.existsSync(written.at(-1)), false);
+});
+
+test('todas las censuras fallidas: 422 REDACT_ITEMS_FAILED', async (t) => {
+    report = { success: true, verified: true, applied: 0, failed: [{ id: 'a', error: 'x' }], text_loss_pages: [] };
+    const { res, body } = await apply(t);
+    assert.equal(res.status, 422);
+    assert.equal(JSON.parse(body.toString()).code, 'REDACT_ITEMS_FAILED');
 });

@@ -592,6 +592,171 @@ def _decode_any(data):
     return texts
 
 
+# Barrido de objetos: guiones y espacios no cuentan ("12345678-Z" = "12345678 Z" = "12345678Z").
+_SEPARATORS = re.compile(r"[\s\-‐-―−­]+")
+_ESCAPES = {ord("n"): 10, ord("r"): 13, ord("t"): 9, ord("b"): 8, ord("f"): 12}
+
+
+def _compact(s):
+    return _SEPARATORS.sub("", norm(s))
+
+
+def _pdf_strings(source):
+    """Cadenas literales y hexadecimales (como bytes) de un objeto en sintaxis PDF."""
+    out = []
+    i, n = 0, len(source)
+    while i < n:
+        c = source[i]
+        if c == "(":
+            buf, depth, i = bytearray(), 1, i + 1
+            while i < n:
+                c = source[i]
+                if c == "\\" and i + 1 < n:
+                    e = source[i + 1]
+                    if e in "01234567":
+                        j = i + 1
+                        while j < n and j < i + 4 and source[j] in "01234567":
+                            j += 1
+                        buf.append(int(source[i + 1:j], 8) & 0xFF)
+                        i = j
+                        continue
+                    if e in "\r\n":  # continuación de línea
+                        i += 3 if source[i + 1:i + 3] == "\r\n" else 2
+                        continue
+                    buf.append(_ESCAPES.get(ord(e), ord(e) & 0xFF))
+                    i += 2
+                    continue
+                if c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                    if depth == 0:
+                        i += 1
+                        break
+                buf.append(ord(c) & 0xFF)
+                i += 1
+            out.append(bytes(buf))
+        elif c == "<" and source.startswith("<<", i):
+            i += 2
+        elif c == "<":
+            k = source.find(">", i)
+            if k == -1:
+                break
+            digits = re.sub(r"[^0-9A-Fa-f]", "", source[i + 1:k])
+            out.append(bytes.fromhex(digits + "0" * (len(digits) % 2)))
+            i = k + 1
+        else:
+            i += 1
+    return out
+
+
+def _texts(data):
+    """Lecturas posibles de unos bytes: PDFDocEncoding/latin-1, UTF-8 y UTF-16 (con o sin
+    BOM; sin BOM, el latin-1 sin los bytes nulos cubre el ASCII en UTF-16BE y LE)."""
+    texts = []
+    if data[:2] in (b"\xfe\xff", b"\xff\xfe"):
+        try:
+            texts.append(data.decode("utf-16"))
+        except UnicodeDecodeError:
+            pass
+    latin = data.decode("latin-1")
+    texts += [latin, latin.replace("\x00", "")]
+    try:
+        texts.append(data.decode("utf-8-sig"))
+    except UnicodeDecodeError:
+        pass
+    if len(data) % 2 == 0 and b"\x00" in data:
+        for enc in ("utf-16-be", "utf-16-le"):
+            try:
+                texts.append(data.decode(enc))
+            except UnicodeDecodeError:
+                pass
+    return texts
+
+
+def _excluded_streams(doc):
+    """Flujos que el barrido no lee: contenidos (página, Form XObjects, patrones, glifos
+    Type3: el texto de página se verifica por geometría y por texto oculto), fuentes y sus
+    CMaps, e imágenes y perfiles ICC (binarios: un término corto aparecería por azar)."""
+    excluded = set()
+    for page in doc:
+        excluded.update(page.get_contents())
+
+    def ref(value):
+        kind, v = value
+        return int(v.split()[0]) if kind == "xref" else None
+
+    for xref in range(1, doc.xref_length()):
+        try:
+            typ = doc.xref_get_key(xref, "Type")[1]
+            subtype = doc.xref_get_key(xref, "Subtype")[1]
+            if typ == "/Font":
+                for key in ("ToUnicode", "Encoding", "CIDToGIDMap"):
+                    x = ref(doc.xref_get_key(xref, key))
+                    if x:
+                        excluded.add(x)
+                procs = doc.xref_get_key(xref, "CharProcs")  # glifos Type3
+                if procs[0] == "xref":
+                    procs = ("dict", doc.xref_object(ref(procs)))
+                if procs[0] == "dict":
+                    excluded.update(int(m) for m in re.findall(r"(\d+) 0 R", procs[1]))
+            elif typ == "/FontDescriptor":
+                for key in ("FontFile", "FontFile2", "FontFile3", "CIDSet"):
+                    x = ref(doc.xref_get_key(xref, key))
+                    if x:
+                        excluded.add(x)
+            if not doc.xref_is_stream(xref):
+                continue
+            if (subtype in ("/Form", "/Image") or typ in ("/Pattern", "/CMap", "/ObjStm", "/XRef")
+                    or doc.xref_get_key(xref, "PatternType")[0] != "null"
+                    or doc.xref_get_key(xref, "ShadingType")[0] != "null"
+                    or doc.xref_get_key(xref, "FunctionType")[0] != "null"):
+                excluded.add(xref)
+            elif doc.xref_get_key(xref, "N")[0] == "int" and (doc.xref_stream(xref) or b"")[36:40] == b"acsp":
+                excluded.add(xref)  # perfil ICC
+        except Exception:
+            continue
+    return excluded
+
+
+_FONT_OBJECTS = ("/Font", "/FontDescriptor", "/Encoding")
+
+
+def objects_with_terms(doc, terms):
+    """¿Aparece un término (sin contar guiones ni espacios) en algún objeto del PDF?
+
+    Recorre todos los objetos descomprimidos (también los de object streams): las cadenas
+    literales y hexadecimales de cada diccionario o array, y el contenido de los flujos que
+    no son contenido de página, fuentes ni imágenes. Las cadenas que escribimos nosotros
+    (OUTPUT_METADATA) no cuentan.
+    """
+    compact_terms = {c for c in (_compact(t) for t in terms) if len(c) >= MIN_TERM_LEN}
+    if not compact_terms:
+        return False
+    ours = {_compact(v) for v in OUTPUT_METADATA.values()}
+    excluded = _excluded_streams(doc)
+
+    def found(data):
+        for text in _texts(data):
+            c = _compact(text)
+            if c and c not in ours and any(t in c for t in compact_terms):
+                return True
+        return False
+
+    for xref in range(1, doc.xref_length()):
+        try:
+            if doc.xref_get_key(xref, "Type")[1] in _FONT_OBJECTS:
+                continue
+            source = doc.xref_object(xref, compressed=False)
+        except Exception:
+            continue
+        if any(found(s) for s in _pdf_strings(source)):
+            return True
+        if xref not in excluded and doc.xref_is_stream(xref) and found(doc.xref_stream(xref) or b""):
+            return True
+    return False
+
+
 def verify_redaction(path, zones_by_page, terms):
     """Busca de nuevo en el PDF de salida. Devuelve la lista de sitios con fugas.
 
@@ -645,6 +810,11 @@ def verify_redaction(path, zones_by_page, terms):
             texts += _decode_any(doc.embfile_get(name))
             if any(_contains_term(t, terms) for t in texts):
                 leaks.add("attachments")
+
+        # Todo lo demás (adjuntos por /AF, /Names /Dests, acciones URI, StructTreeRoot,
+        # capas, /PieceInfo, /PageLabels, /Threads...): cualquier objeto con un término.
+        if objects_with_terms(doc, terms):
+            leaks.add("pdf_objects")
     finally:
         doc.close()
         all_layers.close()

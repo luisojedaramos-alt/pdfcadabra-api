@@ -64,7 +64,12 @@
   MediaBox, desplazado fuera de la página o en una capa OCG apagada) nunca puede contener un
   término, sin contar apariciones (`hidden_text`): se extrae con clip infinito y sin
   `/OCProperties` (copia `<salida>.capas.pdf`, que se borra al terminar) y se descuentan las
-  palabras visibles. Al log solo van los sitios (`form_fields`, `outline`...), nunca los términos.
+  palabras visibles. Además, barrido de todos los objetos descomprimidos (`pdf_objects`):
+  cadenas literales y hex (PDFDocEncoding, UTF-8, UTF-16 con o sin BOM) de cada objeto y el
+  contenido de los flujos, sin contar guiones ni espacios. No lee contenidos (página, Form,
+  patrones, glifos Type3), fuentes ni sus CMaps, ni imágenes y perfiles ICC (binarios: un
+  término corto saldría por azar). Coste medido con 300 págs: barrido 0,04 s, texto oculto
+  1,2 s. Al log solo van los sitios (`form_fields`, `outline`...), nunca los términos.
 - `scrub(hidden_text=False)`: se conserva la capa de texto invisible de un OCR (si no, un
   escaneo deja de poder buscarse); bajo las zonas la borra `apply_redactions`.
 - Texto conservado: se comparan las palabras (también las de la capa OCR) fuera de las zonas antes y después;

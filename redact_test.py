@@ -207,7 +207,8 @@ class VerificacionFinal(unittest.TestCase):
         leaks = redact.verify_redaction(path, zones, {TERM})
         self.assertEqual(
             leaks,
-            ["attachments", "form_fields", "metadata_info", "metadata_xmp", "outline", "page_text"],
+            # pdf_objects: el barrido de objetos también ve el término en esos mismos sitios.
+            ["attachments", "form_fields", "metadata_info", "metadata_xmp", "outline", "page_text", "pdf_objects"],
         )
 
     def test_aparicion_no_seleccionada_no_es_fuga(self):

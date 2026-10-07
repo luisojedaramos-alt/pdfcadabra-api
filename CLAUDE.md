@@ -22,8 +22,17 @@
 
 # Instancia
 
-- Render `0.5c-512mb`: 0,5 CPU y 512 MB de RAM, siempre encendida (no se
-  duerme como la Free). Health Check Path: `/health`.
+- Desde el 2026-10-03, VPS de Clouding (Ubuntu 24.04, 4 vCPU, 8 GB de RAM, sin
+  swap) en vez de Render. Docker Compose (`deploy/docker-compose.yml`, ver
+  `deploy/README.md`): la API y Caddy delante (HTTPS de `api.pdfcadabra.com`,
+  cuerpo máx. 110 MB). No hay `.env`: todo va en el compose.
+- Contenedor de la API: `mem_limit` 6 GiB, `/tmp` en tmpfs de 3 GiB (cuenta
+  dentro de los 6), `pids_limit` 512, sin límite de CPU. `NODE_ENV=production`,
+  `HEAVY_MAX_CONCURRENT=3`, `HEAVY_MAX_QUEUE=8`. Topes de tiempo, los del código:
+  cola 90 s, Comprimir 90 s en total (+30 s de verificación), Anonimizar 180 s
+  por proceso. Health check de Docker a `/health` cada 30 s.
+- Comprobado en el servidor el 2026-10-08 (`docker inspect` del contenedor,
+  revisión 5ba1c90).
 
 # Health check
 

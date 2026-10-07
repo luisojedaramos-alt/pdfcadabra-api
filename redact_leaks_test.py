@@ -193,13 +193,13 @@ class LeakTests(Base):
     def test_2_fuera_del_mediabox(self):
         doc = base_doc()
         append_contents(doc, doc[0], f"BT /{font_name(doc[0])} 12 Tf 72 900 Td ({TERM}) Tj ET".encode())
-        self.assertBlocked(*self.apply(self.save(doc)))
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
 
     def test_2_fuera_del_cropbox(self):
         doc = base_doc()
         append_contents(doc, doc[0], f"BT /{font_name(doc[0])} 12 Tf 72 30 Td ({TERM}) Tj ET".encode())
         doc[0].set_cropbox(fitz.Rect(0, 0, 595, 700))
-        self.assertBlocked(*self.apply(self.save(doc)))
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
 
     # --- 3. Adjuntos por /AF ---
     def test_3_facturx_af_y_embeddedfiles_misma_filespec(self):
@@ -328,14 +328,22 @@ class LeakTests(Base):
         items.append(dict(items[0], id="neg", page=-1))  # -1 no es "la última página"
         self.assertBlocked(*self.apply(path, items))
 
-    # --- Decisión de Luis: una aparición visible desmarcada + una oculta ---
+    # --- Decisiones de Luis: una aparición visible desmarcada + una oculta ---
     def test_desmarcada_visible_mas_oculta(self):
+        """La visible desmarcada se queda; la oculta se censura sola."""
         doc = base_doc(pages=2)
         append_contents(doc, doc[1], f"BT /{font_name(doc[1])} 12 Tf 72 30 Td ({TERM}) Tj ET".encode())
         doc[1].set_cropbox(fitz.Rect(0, 0, 595, 700))
         path = self.save(doc)
         # Se censura la página 0 y se desmarca la aparición visible de la 1.
-        self.assertBlocked(*self.apply(path, self.search_items(path, pages={0})))
+        report, out = self.apply(path, self.search_items(path, pages={0}))
+        self.assertTrue(server_delivers(report), report)
+        self.assertEqual(report.get("text_loss_pages"), [])
+        doc = fitz.open(out)
+        self.assertNotIn(TERM, doc[0].get_text())
+        self.assertIn(TERM, doc[1].get_text(clip=doc[1].rect))
+        self.assertNotIn(TERM, redact.hidden_page_text(doc[1], doc[1]))
+        doc.close()
 
 
 # ==========================================

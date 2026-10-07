@@ -348,10 +348,11 @@ def _word_key(word):
     return (text, round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1))
 
 
-def hidden_page_text(page_visible, page_all):
-    """Texto de la página que no se ve: fuera del CropBox o del MediaBox, desplazado fuera
-    de la página o en una capa OCG apagada. `page_all` es la misma página extraída sin
-    recorte y con todas las capas visibles (documento sin /OCProperties).
+def hidden_words(page_visible, page_all):
+    """Palabras de la página que no se ven, como [(texto, Rect)]: fuera del CropBox o del
+    MediaBox, desplazadas fuera de la página o en una capa OCG apagada. `page_all` es la
+    misma página extraída sin recorte y con todas las capas visibles (documento sin
+    /OCProperties).
 
     Cada palabra visible (misma posición y texto) descuenta una de `page_all`; lo que queda
     es el texto oculto, en el orden de la página. Las palabras llegan sin girar: la zona
@@ -366,8 +367,38 @@ def hidden_page_text(page_visible, page_all):
         if visible[key]:
             visible[key] -= 1
         else:
-            hidden.append(w[4])
-    return " ".join(hidden)
+            hidden.append((w[4], fitz.Rect(w[:4])))
+    return hidden
+
+
+def hidden_page_text(page_visible, page_all):
+    """El texto oculto de la página (hidden_words) en una cadena."""
+    return " ".join(w for w, _ in hidden_words(page_visible, page_all))
+
+
+def hidden_term_rects(page_visible, page_all, terms):
+    """Rectángulos de las palabras ocultas que forman parte de un término.
+
+    Se busca igual que en la verificación (cada término en el texto oculto normalizado y
+    unido por espacios), así que lo que queda tras censurar estas palabras ya no contiene
+    ningún término. Se censura la palabra entera: no se ve.
+    """
+    words = hidden_words(page_visible, page_all)
+    if not words or not terms:
+        return []
+    normed = [norm(w) for w, _ in words]
+    starts, pos = [], 0
+    for w in normed:
+        starts.append(pos)
+        pos += len(w) + 1
+    joined = " ".join(normed)
+    hit = set()
+    for t in terms:
+        i = joined.find(t)
+        while i != -1:
+            hit.update(range(bisect.bisect_right(starts, i) - 1, bisect.bisect_left(starts, i + len(t))))
+            i = joined.find(t, i + 1)
+    return [words[k][1] for k in sorted(hit)]
 
 
 def open_all_layers(path):
@@ -1037,6 +1068,16 @@ def apply(input_path, output_path, items):
                 terms.add(t)
         words_before[page.number] = words_outside(words, zones)
 
+    # Texto oculto con un término (decisión de Luis, 2026-10-07): se censura siempre,
+    # porque el usuario no lo ve y no ha podido decidir dejarlo. Se busca antes de
+    # censurar, en el documento tal como lo vio el usuario.
+    hidden_by_page = {}
+    if terms:
+        for page in doc:
+            rects = hidden_term_rects(page, page, terms)
+            if rects:
+                hidden_by_page[page.number] = rects
+
     for page in doc:
         if page.number in zones_by_page:
             # CRÍTICO: images=fitz.PDF_REDACT_IMAGE_PIXELS garantiza la destrucción
@@ -1044,6 +1085,14 @@ def apply(input_path, output_path, items):
             before = _image_slots(page)
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
             recompress_redacted_images(doc, page, before)
+        if page.number in hidden_by_page:
+            # Solo el texto y sin relleno: la zona no se ve, y no debe tocar imágenes ni
+            # trazos que sí se vean (un fondo de página que llega fuera del CropBox). Estas
+            # zonas no van a zones_by_page: si se llevaran texto visible, text_loss_pages
+            # lo avisa.
+            for rect in hidden_by_page[page.number]:
+                page.add_redact_annot(rect, fill=False)
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_NONE)
 
     remove_outline_terms(doc, terms)
     doc = compact_xref(doc)

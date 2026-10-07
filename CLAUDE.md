@@ -74,6 +74,13 @@
   patrones, glifos Type3), fuentes ni sus CMaps, ni imágenes y perfiles ICC (binarios: un
   término corto saldría por azar). Coste medido con 300 págs: barrido 0,04 s, texto oculto
   1,2 s. Al log solo van los sitios (`form_fields`, `outline`...), nunca los términos.
+- Texto oculto en `apply` (decisión de Luis, 2026-10-07, fase 2): las palabras ocultas que
+  forman un término se censuran solas, porque el usuario no las ve. Se buscan antes de
+  censurar (`hidden_term_rects`, igual que la verificación) y se borran en una pasada aparte
+  solo de texto: sin relleno, sin tocar imágenes ni trazos (un fondo que sale del CropBox se
+  ve). Esas zonas no van a `zones_by_page`: si se llevaran texto visible, lo avisa
+  `X-Redact-Text-Loss`. Las palabras llegan sin girar: la zona visible es
+  `page.rect * derotation_matrix`.
 - Censuras fallidas (`failed` del informe, p. ej. página inexistente): si falla CUALQUIERA,
   `server.js` responde 422 `REDACT_ITEMS_FAILED` con la lista y no envía nada (desde
   2026-10-07; antes, con fallos parciales, se enviaba con `X-Redact-Warnings`, que ya no se usa).

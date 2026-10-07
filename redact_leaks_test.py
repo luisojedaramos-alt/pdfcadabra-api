@@ -3,9 +3,13 @@ censurado podía seguir en el PDF entregado.
 
 Cada caso genera su PDF sintético al vuelo (sin PDFs en el repo), lo censura con
 redact.apply y comprueba lo que haría /v1/redact/apply con el informe:
-- LeakTests: el término sigue recuperable si se entrega -> NO debe entregarse (422).
+- LeakTests: caminos por los que el término seguía recuperable. En la fase 1 no se
+  entregaban (422); desde la fase 2 se limpian y se entregan (200) sin el término en
+  ningún objeto descomprimido y con el texto de control intacto. Siguen en 422 el flujo
+  de contenido no analizable, los rectángulos no válidos y las censuras fallidas.
 - CorrectTests: casos que la auditoría dio por correctos -> se entregan (200), sin el
   término en ningún objeto descomprimido y sin perder el texto de control.
+- VectorTests: trazos que toca una zona (REMOVE_IF_TOUCHED).
 
 Uso: python -m unittest redact_leaks_test.py   (necesita PyMuPDF, como redact.py)
 """
@@ -165,7 +169,7 @@ class Base(unittest.TestCase):
 
 
 # ==========================================
-# FUGAS: NO DEBEN ENTREGARSE
+# FUGAS: SE ENTREGAN LIMPIAS (SALVO LAS QUE NO SE PUEDEN ARREGLAR)
 # ==========================================
 class LeakTests(Base):
     # --- 1. ' con el operando en otro flujo de /Contents, o flujo no analizable ---

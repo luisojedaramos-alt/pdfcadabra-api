@@ -88,6 +88,9 @@
   rectángulo invertido, vacío o que no toca la página (MuPDF los aceptaba sin tapar nada).
   Los rectángulos llegan sin girar, como los da `search_for`: se comparan con
   `page.rect * page.derotation_matrix`. Uno que sale en parte de la página sí vale.
+- Adjuntos por `/AF` (PDF/A-3, Factur-X): tras `scrub`, `remove_associated_files` quita la
+  clave `/AF` de todos los objetos, igual que `scrub(embedded_files=True)` vacía el árbol de
+  nombres; el Filespec y su flujo quedan huérfanos y `save(garbage=4)` los elimina.
 - `scrub(hidden_text=False)`: se conserva la capa de texto invisible de un OCR (si no, un
   escaneo deja de poder buscarse); bajo las zonas la borra `apply_redactions`.
 - Texto conservado: se comparan las palabras (también las de la capa OCR) fuera de las zonas antes y después;

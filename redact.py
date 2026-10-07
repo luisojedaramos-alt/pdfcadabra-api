@@ -636,7 +636,30 @@ def remove_outline_terms(doc, terms):
 
 
 # ==========================================
-# 6. VERIFICACIÓN FINAL
+# 6. ADJUNTOS POR /AF
+# ==========================================
+def remove_associated_files(doc):
+    """Quita /AF (archivos asociados: PDF/A-3, Factur-X) de todos los objetos que lo tengan.
+
+    scrub(embedded_files=True) vacía el árbol de nombres /EmbeddedFiles, pero un adjunto
+    también puede colgar de /AF (del catálogo, de una página...), con o sin entrada en el
+    árbol. Se tratan igual que los del árbol: fuera. Sin referencias, el Filespec y su
+    flujo se quedan huérfanos y save(garbage=4) los elimina.
+    """
+    removed = 0
+    for xref in range(1, doc.xref_length()):
+        try:
+            if doc.xref_get_key(xref, "AF")[0] == "null":
+                continue
+        except Exception:
+            continue
+        doc.xref_set_key(xref, "AF", "null")
+        removed += 1
+    return removed
+
+
+# ==========================================
+# 7. VERIFICACIÓN FINAL
 # ==========================================
 def _contains_term(value, terms):
     v = norm(value if isinstance(value, str) else str(value or ""))
@@ -1117,6 +1140,7 @@ def apply(input_path, output_path, items):
         thumbnails=True,
         xml_metadata=True,
     )
+    remove_associated_files(doc)
     doc.set_metadata({
         "creator": OUTPUT_METADATA["creator"],
         "producer": OUTPUT_METADATA["producer"],

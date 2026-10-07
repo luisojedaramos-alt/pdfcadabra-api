@@ -210,14 +210,21 @@ class LeakTests(Base):
                              f"/AFRelationship/Data/EF<</F {ef} 0 R/UF {ef} 0 R>>>>")
         doc.xref_set_key(doc.pdf_catalog(), "Names", f"<</EmbeddedFiles<</Names[(factur-x.xml) {fs} 0 R]>>>>")
         doc.xref_set_key(doc.pdf_catalog(), "AF", f"[{fs} 0 R]")
-        self.assertBlocked(*self.apply(self.save(doc)))
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
 
     def test_3_af_solo_en_el_catalogo(self):
         doc = base_doc()
         ef = new_object(doc, "<<>>", f"af {TERM}".encode())
         fs = new_object(doc, f"<</Type/Filespec/F(datos.bin)/EF<</F {ef} 0 R>>>>")
         doc.xref_set_key(doc.pdf_catalog(), "AF", f"[{fs} 0 R]")
-        self.assertBlocked(*self.apply(self.save(doc)))
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_3_af_en_la_pagina(self):
+        doc = base_doc()
+        ef = new_object(doc, "<<>>", f"pagina {TERM}".encode())
+        fs = new_object(doc, f"<</Type/Filespec/F({TERM}.xml)/EF<</F {ef} 0 R>>>>")
+        doc.xref_set_key(doc[0].xref, "AF", f"[{fs} 0 R]")
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
 
     # --- 4. Capas OCG ---
     def test_4_texto_en_capa_off(self):

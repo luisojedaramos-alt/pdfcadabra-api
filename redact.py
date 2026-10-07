@@ -354,9 +354,12 @@ def hidden_page_text(page_visible, page_all):
     recorte y con todas las capas visibles (documento sin /OCProperties).
 
     Cada palabra visible (misma posición y texto) descuenta una de `page_all`; lo que queda
-    es el texto oculto, en el orden de la página.
+    es el texto oculto, en el orden de la página. Las palabras llegan sin girar: la zona
+    visible es page.rect * derotation_matrix (con page.rect, en una página a 90 o 270 grados
+    el texto visible de abajo contaba como oculto).
     """
-    visible = Counter(_word_key(w) for w in page_visible.get_text("words", clip=page_visible.rect))
+    shown = page_visible.rect * page_visible.derotation_matrix
+    visible = Counter(_word_key(w) for w in page_visible.get_text("words", clip=shown))
     hidden = []
     for w in page_all.get_text("words", clip=fitz.INFINITE_RECT(), flags=_ALL_TEXT_FLAGS):
         key = _word_key(w)

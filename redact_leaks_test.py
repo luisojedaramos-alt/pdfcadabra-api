@@ -421,6 +421,23 @@ class CorrectTests(Base):
         self.assertIn(TERM, doc[1].get_text())
         doc.close()
 
+    def test_pagina_girada_desmarcada_abajo(self):
+        """Página apaisada (girada 90): una aparición visible abajo que el usuario desmarca
+        no es texto oculto (antes, con clip=page.rect sin girar, lo parecía: 422)."""
+        doc = fitz.open()
+        for _ in range(2):
+            page = doc.new_page()
+            page.insert_text((400, 800), f"{TERM} abajo", fontsize=12)
+            page.insert_text((72, 200), CONTROL, fontsize=12)
+            page.set_rotation(90)
+        path = self.save(doc)
+        report, out = self.apply(path, self.search_items(path, pages={0}))
+        self.assertTrue(server_delivers(report), report)
+        doc = fitz.open(out)
+        self.assertNotIn(TERM, doc[0].get_text())
+        self.assertIn(TERM, doc[1].get_text())
+        doc.close()
+
     def test_xobject_en_dos_paginas_solo_la_primera(self):
         doc = fitz.open()
         src = fitz.open()

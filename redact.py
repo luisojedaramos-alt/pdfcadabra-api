@@ -85,7 +85,7 @@ def _skip_inline_image(data, i):
 def rewrite_quote_operators(data):
     """Devuelve el flujo de contenido con ' y " reescritos, o None si no hay ninguno.
 
-    Lanza _ContentSyntaxError si el flujo no se puede analizar (se deja como está).
+    Lanza _ContentSyntaxError si el flujo no se puede analizar.
     """
     if b"'" not in data and b'"' not in data:
         return None
@@ -177,32 +177,58 @@ def rewrite_quote_operators(data):
     return bytes(out)
 
 
+def _rewrite_page_contents(doc, page):
+    """Reescribe ' y " en el contenido de la página, analizado ya unido: los flujos de
+    /Contents son un único contenido partido por donde sea entre dos tokens (el operando
+    de un ' puede estar en un flujo y el operador en el siguiente). True si cambió algo."""
+    xrefs = page.get_contents()
+    streams = [doc.xref_stream(x) or b"" for x in xrefs]
+    new = rewrite_quote_operators(b"\n".join(streams))
+    if new is None:
+        return False
+    if len(xrefs) == 1:
+        doc.update_stream(xrefs[0], new)
+        return True
+    # Si ningún operador cruza de un flujo a otro, cada flujo se reescribe por separado,
+    # como antes; si no, la página pasa a tener un único flujo con el contenido unido.
+    try:
+        parts = [rewrite_quote_operators(s) for s in streams]
+    except _ContentSyntaxError:
+        parts = None
+    if parts is not None and b"\n".join(p if p is not None else s for p, s in zip(parts, streams)) == new:
+        for x, p in zip(xrefs, parts):
+            if p is not None:
+                doc.update_stream(x, p)
+        return True
+    joined = doc.get_new_xref()
+    doc.update_object(joined, "<<>>")
+    doc.update_stream(joined, new)
+    doc.xref_set_key(page.xref, "Contents", f"{joined} 0 R")
+    return True
+
+
 def normalize_quote_operators(doc):
     """Reescribe ' y " en los contenidos de página y en los Form XObjects.
 
-    Devuelve cuántos flujos se reescribieron y cuántos no se pudieron analizar.
+    Devuelve cuántos contenidos se reescribieron. Lanza _ContentSyntaxError si alguno con
+    ' o " no se puede analizar: no se puede saber si MuPDF sacaría el texto de la página
+    ni dónde quedaría, así que no se censura.
     """
-    xrefs = set()
+    rewritten = 0
     for page in doc:
-        xrefs.update(page.get_contents())
+        rewritten += _rewrite_page_contents(doc, page)
     for xref in range(1, doc.xref_length()):
         try:
-            if doc.xref_is_stream(xref) and doc.xref_get_key(xref, "Subtype") == ("name", "/Form"):
-                xrefs.add(xref)
+            if not (doc.xref_is_stream(xref) and doc.xref_get_key(xref, "Subtype") == ("name", "/Form")):
+                continue
         except Exception:
             continue
-    rewritten = skipped = 0
-    for xref in sorted(xrefs):
-        try:
-            data = doc.xref_stream(xref)
-            new = rewrite_quote_operators(data) if data else None
-        except _ContentSyntaxError:
-            skipped += 1  # se deja tal cual: la comprobación de texto conservado avisará
-            continue
+        data = doc.xref_stream(xref)
+        new = rewrite_quote_operators(data) if data else None
         if new is not None:
             doc.update_stream(xref, new)
             rewritten += 1
-    return rewritten, skipped
+    return rewritten
 
 
 # ==========================================
@@ -961,7 +987,13 @@ def apply(input_path, output_path, items):
     doc = fitz.open(input_path)
 
     # 1. Antes de tocar nada: ' y " explícitos (si no, MuPDF saca el texto de la página).
-    normalize_quote_operators(doc)
+    # Un contenido con ' o " que no se puede analizar no se censura: server.js responde 422.
+    try:
+        normalize_quote_operators(doc)
+    except _ContentSyntaxError:
+        doc.close()
+        return {"success": False, "verified": False, "leaks": ["content_syntax"],
+                "applied": 0, "failed": []}
     # 2. Campos y anotaciones a contenido de página, para que la censura los alcance.
     pending = flatten_document(doc)
 

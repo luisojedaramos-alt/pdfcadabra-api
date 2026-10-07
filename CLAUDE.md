@@ -49,6 +49,10 @@
   de página y Form XObjects; (2) aplana campos y anotaciones (`doc.bake`) y quita el
   `/AcroForm`; (3) censura con `PDF_REDACT_IMAGE_PIXELS`; (4) quita los marcadores que
   contienen un término; (5) `doc.scrub()`; (6) guarda y vuelve a buscar en la salida.
+- (1) se hace sobre el contenido de la página ya unido (el operando de un `'` puede estar en un
+  flujo de `/Contents` y el operador en el siguiente; si alguno cruza, la página pasa a un único
+  flujo). Si un contenido con `'` o `"` no se puede analizar, no se censura: 422
+  `REDACT_NOT_VERIFIED` (`leaks: ["content_syntax"]`).
 - (1) esquiva un fallo de MuPDF 1.28.2 (la última versión de PyMuPDF a 2026-10-02): su
   filtro de contenido (`apply_redactions`, `clean_contents`, `scrub` y `save(clean=True)`)
   convierte `14 TL 60 780 Td (x) '` en `60 780 TD T* (x)Tj` y saca todo el texto de la

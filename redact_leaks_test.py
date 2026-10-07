@@ -179,11 +179,15 @@ class LeakTests(Base):
     def test_1_quote_operando_en_otro_flujo(self):
         path = self._quote(f"BT /FN 12 Tf 14 TL 72 742 Td (Nombre) Tj ({TERM}) ".encode(),
                            b"' (otra linea) ' ET")
-        self.assertBlocked(*self.apply(path))
+        self.assertDeliveredClean(*self.apply(path))
 
     def test_1_quote_flujo_no_analizable(self):
+        """Sigue sin entregarse: no se sabe dónde dejaría MuPDF el texto."""
         path = self._quote(f"BT /FN 12 Tf 14 TL 72 742 Td (Nombre) Tj ({TERM}) ' (otra linea) ' ET }}".encode())
-        self.assertBlocked(*self.apply(path))
+        report, out = self.apply(path)
+        self.assertBlocked(report, out)
+        self.assertEqual(report["leaks"], ["content_syntax"])
+        self.assertFalse(os.path.exists(out))
 
     # --- 2. Texto fuera del MediaBox o del CropBox ---
     def test_2_fuera_del_mediabox(self):

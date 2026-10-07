@@ -889,7 +889,130 @@ def clean_structures(doc, found):
 
 
 # ==========================================
-# 8. VERIFICACIÓN FINAL
+# 8. RELLENOS LISOS QUE TOCA UNA ZONA
+# ==========================================
+# REMOVE_IF_TOUCHED quita entero todo trazo que toque una zona, también un fondo de página o
+# el sombreado de una celda (la página quedaba en blanco). Antes de censurar se guardan los
+# rectángulos de un solo color sin trazo que tocan una zona y, después, los que han
+# desaparecido se vuelven a pintar debajo de todo el contenido: el negro de la censura y el
+# texto quedan encima. Un rectángulo liso solo lleva su color y su sitio, nada que censurar.
+# Cualquier otro trazo (curvas, firmas, sellos, degradados, formas irregulares) se sigue
+# quitando.
+#
+# Solo se repinta debajo un relleno que no tapaba nada de lo dibujado antes (salvo otros
+# rellenos que también se repintan y lo que cae entero dentro de una zona): repintado debajo,
+# un rectángulo puesto encima de un texto o una imagen para taparlo lo destaparía.
+
+def _path_rects(items):
+    """Rectángulos (sin girar) que forman el trazado, o None si no es solo rectángulos
+    alineados con los ejes: "re", un "qu" rectangular o 3-4 líneas horizontales y
+    verticales que cierran un rectángulo."""
+    if items and all(it[0] == "re" for it in items):
+        return [fitz.Rect(it[1]) for it in items]
+    if len(items) == 1 and items[0][0] == "qu":
+        points = list(items[0][1])
+    elif 3 <= len(items) <= 4 and all(it[0] == "l" for it in items):
+        if any(a.x != b.x and a.y != b.y for _, a, b in items):
+            return None
+        points = [p for it in items for p in it[1:]]
+    else:
+        return None
+    xs, ys = {round(p.x, 3) for p in points}, {round(p.y, 3) for p in points}
+    if len(xs) != 2 or len(ys) != 2:
+        return None
+    return [fitz.Rect(min(xs), min(ys), max(xs), max(ys))]
+
+
+def _fill_key(path):
+    return (tuple(round(v, 1) for v in path["rect"]), path["fill"], round(path.get("fill_opacity") or 1, 3))
+
+
+def solid_fills_touching(page, zones):
+    """Rellenos lisos que tocan una zona y se pueden repintar debajo, en orden de dibujo:
+    [(clave, rectángulos ya recortados, color, opacidad)]."""
+    if not zones:
+        return []
+    index = ZoneIndex(zones)
+    log = page.get_bboxlog()
+    stack = []  # recortes y grupos activos: (nivel, entrada)
+    candidates = []
+    for path in page.get_drawings(extended=True):
+        level = path.get("level", 0)
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        if path["type"] in ("clip", "group"):
+            stack.append((level, path))
+            continue
+        if path["type"] != "f" or path.get("fill") is None or not index.touches(fitz.Rect(path["rect"])):
+            continue
+        rects = _path_rects(path["items"])
+        opacity = path.get("fill_opacity") or 1
+        if rects is None or (len(rects) > 1 and opacity < 1):
+            continue
+        clip, ok = fitz.INFINITE_RECT(), True
+        for _, active in stack:
+            if active["type"] == "clip":
+                clip_rects = _path_rects(active.get("items") or [])
+                if clip_rects is None or len(clip_rects) != 1:
+                    ok = False  # recorte no rectangular: no se puede reproducir
+                    break
+                clip &= fitz.Rect(active["scissor"])
+            elif active.get("opacity") not in (None, 1) or active.get("blendmode") not in (None, "Normal"):
+                ok = False  # grupo transparente: el color no sería el mismo
+                break
+        rects = [r & clip for r in rects]
+        rects = [r for r in rects if not r.is_empty]
+        seqno = path.get("seqno")
+        if not ok or not rects or seqno is None or seqno >= len(log) or log[seqno][0] != "fill-path":
+            continue
+        candidates.append((seqno, _fill_key(path), rects, path["fill"], opacity))
+    # ¿Tapaba algo dibujado antes? Lo que cae entero dentro de una zona desaparece igual, y el
+    # texto invisible (capa OCR) no se ve.
+    kept, safe = set(), []
+    for seqno, key, rects, color, opacity in candidates:
+        covers = False
+        for i in range(seqno):
+            kind, bbox = log[i]
+            if i in kept or kind == "ignore-text":
+                continue
+            box = fitz.Rect(bbox)
+            if box.is_empty or not any(box.intersects(r) for r in rects):
+                continue
+            if any(z.contains(box) for z in index.candidates(box.y0, box.y1)):
+                continue
+            covers = True
+            break
+        if not covers:
+            kept.add(seqno)
+            safe.append((key, rects, color, opacity))
+    return safe
+
+
+def restore_fills(page, saved):
+    """Vuelve a pintar debajo de todo los rellenos de `saved` que apply_redactions ha
+    quitado. Devuelve cuántos."""
+    if not saved:
+        return 0
+    remaining = Counter(_fill_key(p) for p in page.get_drawings() if p["type"] == "f" and p.get("fill") is not None)
+    missing = []
+    for key, rects, color, opacity in saved:
+        if remaining[key]:
+            remaining[key] -= 1
+        else:
+            missing.append((rects, color, opacity))
+    if not missing:
+        return 0
+    shape = page.new_shape()
+    for rects, color, opacity in missing:
+        for r in rects:
+            shape.draw_rect(r)
+        shape.finish(fill=color, color=None, fill_opacity=opacity, width=0)
+    shape.commit(overlay=False)
+    return len(missing)
+
+
+# ==========================================
+# 9. VERIFICACIÓN FINAL
 # ==========================================
 def _contains_term(value, terms):
     v = norm(value if isinstance(value, str) else str(value or ""))
@@ -1363,10 +1486,12 @@ def apply(input_path, output_path, items):
             # Trazos (decisión de Luis, 2026-10-07): fuera todo trazo que toque una zona, no
             # solo los que cubre entera (por defecto, REMOVE_IF_COVERED dejaba bajo el negro
             # una firma que entra y sale de la zona). Se acepta perder las líneas de tabla
-            # que rocen la zona.
+            # que rocen la zona. Los rellenos lisos (fondos, celdas) se repintan debajo.
             before = _image_slots(page)
+            fills = solid_fills_touching(page, zones_by_page[page.number])
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS,
                                   graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED)
+            restore_fills(page, fills)
             recompress_redacted_images(doc, page, before)
         if page.number in hidden_by_page:
             # Solo el texto y sin relleno: la zona no se ve, y no debe tocar imágenes ni

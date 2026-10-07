@@ -102,9 +102,15 @@
   `page.rect * page.derotation_matrix`. Uno que sale en parte de la página sí vale.
 - Trazos (decisión de Luis, 2026-10-07): `REMOVE_IF_TOUCHED` quita entero todo trazo que
   toque una zona (antes, `REMOVE_IF_COVERED`, una firma que entraba y salía quedaba bajo el
-  negro). Se aceptan las líneas de tabla que rocen la zona. Ojo: también un relleno (fondo de
-  página completa, sombreado de celda, relleno con patrón) que la zona toque desaparece
-  entero; el texto que perdiera un patrón lo avisa `X-Redact-Text-Loss`.
+  negro). Se aceptan las líneas de tabla que rocen la zona. Un relleno con patrón que la zona
+  toque desaparece entero; el texto que perdiera lo avisa `X-Redact-Text-Loss`.
+- Rellenos lisos (decisión de Luis, 2026-10-07): `solid_fills_touching` guarda antes de
+  censurar los rectángulos de un solo color sin trazo que tocan una zona (fondo de página,
+  celdas), recortados por su recorte si es rectangular; `restore_fills` repinta debajo de todo
+  (`overlay=False`) los que `apply_redactions` ha quitado. No se guardan los que están bajo un
+  recorte no rectangular o en un grupo transparente, ni los que tapaban algo dibujado antes
+  (orden de `get_bboxlog`, cuyo índice es el `seqno` de `get_drawings`): repintados debajo,
+  destaparían lo que ocultaban; esos se quitan como antes.
 - Adjuntos por `/AF` (PDF/A-3, Factur-X): tras `scrub`, `remove_associated_files` quita la
   clave `/AF` de todos los objetos, igual que `scrub(embedded_files=True)` vacía el árbol de
   nombres; el Filespec y su flujo quedan huérfanos y `save(garbage=4)` los elimina.

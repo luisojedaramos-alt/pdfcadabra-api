@@ -785,6 +785,115 @@ class VectorTests(Base):
             for it in d["items"] for p in it[1:] if isinstance(p, fitz.Point) and zone.contains(p))
         self.assertFalse(server_delivers(report) and inside > 0, f"{inside} puntos del trazo bajo la zona")
 
+    # --- Rellenos lisos que toca una zona: se repintan debajo de todo ---
+    def _rect(self, page, rect, fill, opacity=1):
+        sh = page.new_shape()
+        sh.draw_rect(rect)
+        sh.finish(fill=fill, color=None, fill_opacity=opacity)
+        sh.commit()
+
+    def _pixel(self, out, x, y, page_no=0):
+        """Color renderizado (RGB, 72 ppp) en un punto de la página."""
+        doc = fitz.open(out)
+        pix = doc[page_no].get_pixmap(dpi=72)
+        doc.close()
+        return pix.pixel(int(x), int(y))
+
+    def assertColor(self, actual, expected):
+        self.assertTrue(all(abs(a - e) <= 2 for a, e in zip(actual, expected)), f"{actual} != {expected}")
+
+    def _redact_term(self, doc):
+        report, out = self.apply(self.save(doc))
+        self.assertDeliveredClean(report, out)
+        return out
+
+    def test_fondo_de_pagina_completa_se_conserva(self):
+        doc = base_doc()
+        page = doc[0]
+        # El fondo, dibujado antes que el texto (como en un PDF real).
+        bg = new_object(doc, "<<>>", b"0.85 0.9 1 rg 0 0 595 842 re f")
+        refs = " ".join(f"{x} 0 R" for x in [bg] + page.get_contents())
+        doc.xref_set_key(page.xref, "Contents", f"[{refs}]")
+        out = self._redact_term(doc)
+        self.assertColor(self._pixel(out, 400, 600), (217, 230, 255))
+        self.assertEqual(self._pixel(out, 150, 96), (0, 0, 0))  # el negro de la censura, encima
+
+    def test_celda_sombreada_se_conserva(self):
+        doc = fitz.open()
+        page = doc.new_page()
+        self._rect(page, fitz.Rect(60, 85, 300, 110), (0.8, 0.8, 0.8))  # celda que toca la zona
+        page.insert_text((72, 100), f"Nombre: {TERM}", fontsize=12)
+        page.insert_text((72, 200), f"Texto de {CONTROL}", fontsize=12)
+        out = self._redact_term(doc)
+        self.assertColor(self._pixel(out, 280, 98), (204, 204, 204))
+
+    def test_texto_blanco_sobre_franja_oscura_sigue_visible(self):
+        doc = fitz.open()
+        page = doc.new_page()
+        self._rect(page, fitz.Rect(0, 80, 595, 110), (0.1, 0.1, 0.3))  # franja que toca la zona
+        page.insert_text((72, 100), f"Nombre: {TERM}", fontsize=12, color=(1, 1, 1))
+        page.insert_text((300, 100), "Blanco visible", fontsize=12, color=(1, 1, 1))
+        page.insert_text((72, 200), f"Texto de {CONTROL}", fontsize=12)
+        out = self._redact_term(doc)
+        doc = fitz.open(out)
+        pix = doc[0].get_pixmap(dpi=144, clip=fitz.Rect(300, 88, 380, 104))
+        doc.close()
+        colors = {pix.pixel(x, y) for x in range(pix.width) for y in range(pix.height)}
+        self.assertIn((255, 255, 255), colors)  # el texto blanco
+        self.assertIn((26, 26, 77), colors)  # sobre la franja oscura
+
+    def test_firma_vectorial_sobre_fondo(self):
+        """Con fondo, la firma tocada se sigue quitando y el fondo se queda."""
+        doc = fitz.open()
+        page = doc.new_page()
+        self._rect(page, page.rect, (0.95, 0.95, 0.8))
+        page.insert_text((72, 300), CONTROL, fontsize=12)
+        sh = page.new_shape()
+        sh.draw_polyline([fitz.Point(60 + i * 8, 110 + (15 if i % 2 else -15)) for i in range(40)])
+        sh.finish(color=(0, 0, 1), width=1.5)
+        sh.commit()
+        report, out = self.apply(self.save(doc), [manual(0, fitz.Rect(100, 90, 300, 130))])
+        self.assertTrue(server_delivers(report), report)
+        out_doc = fitz.open(out)
+        self.assertFalse([d for d in out_doc[0].get_drawings() if d.get("color") == (0.0, 0.0, 1.0)])
+        out_doc.close()
+        self.assertColor(self._pixel(out, 500, 600), (242, 242, 204))
+
+    def test_relleno_recortado_solo_dentro_del_recorte(self):
+        doc = base_doc()
+        # Antes que el texto. Recorte en coordenadas PDF (origen abajo): y 732-757 = 85-110.
+        page = doc[0]
+        bg = new_object(doc, "<<>>", b"q 60 732 300 25 re W n 0 0.5 0 rg 0 0 595 842 re f Q")
+        refs = " ".join(f"{x} 0 R" for x in [bg] + page.get_contents())
+        doc.xref_set_key(page.xref, "Contents", f"[{refs}]")
+        out = self._redact_term(doc)
+        self.assertColor(self._pixel(out, 340, 100), (0, 128, 0))  # dentro del recorte
+        self.assertEqual(self._pixel(out, 400, 600), (255, 255, 255))  # fuera: sin pintar
+
+    def test_pagina_girada_con_fondo(self):
+        doc = fitz.open()
+        page = doc.new_page()
+        self._rect(page, fitz.Rect(0, 0, 595, 842), (0.85, 0.9, 1))
+        page.insert_text((400, 800), f"{TERM} abajo", fontsize=12)
+        page.insert_text((72, 200), CONTROL, fontsize=12)
+        page.set_rotation(90)
+        out = self._redact_term(doc)
+        self.assertColor(self._pixel(out, 100, 100), (217, 230, 255))
+        self.assertColor(self._pixel(out, 700, 500), (217, 230, 255))
+
+    def test_relleno_que_tapaba_texto_no_se_repinta_debajo(self):
+        """Un rectángulo puesto encima de un texto para taparlo, repintado debajo, lo
+        destaparía: ese no se repinta (se quita, como con REMOVE_IF_TOUCHED solo)."""
+        doc = base_doc()
+        page = doc[0]
+        page.insert_text((250, 100), "tapado", fontsize=12)
+        self._rect(page, fitz.Rect(240, 85, 320, 110), (1, 1, 0))  # amarillo encima de "tapado"
+        report, out = self.apply(self.save(doc), [manual(0, fitz.Rect(70, 85, 245, 110))])
+        self.assertTrue(server_delivers(report), report)
+        out_doc = fitz.open(out)
+        self.assertFalse([d for d in out_doc[0].get_drawings() if d.get("fill") == (1.0, 1.0, 0.0)])
+        out_doc.close()
+
 
 if __name__ == "__main__":
     unittest.main()

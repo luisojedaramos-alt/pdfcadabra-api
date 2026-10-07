@@ -231,12 +231,33 @@ class LeakTests(Base):
         doc = base_doc()
         off = doc.add_ocg("oculta", on=False)
         doc[0].insert_text((72, 650), f"Capa off {TERM}", fontsize=12, oc=off)
-        self.assertBlocked(*self.apply(self.save(doc)))
+        report, out = self.apply(self.save(doc))
+        self.assertDeliveredClean(report, out)
+        # Sin relleno: nada nuevo se ve donde estaba el texto de la capa apagada, y el
+        # resto de la capa sigue en ella.
+        doc = fitz.open(out)
+        self.assertEqual(doc[0].get_pixmap(clip=fitz.Rect(72, 630, 300, 660)).color_count(), 1)
+        doc.close()
+        self.assertIn("Capa off", self._all_layers_text(out))
+
+    def _all_layers_text(self, path):
+        doc, copy = redact.open_all_layers(path)
+        try:
+            return doc[0].get_text()
+        finally:
+            doc.close()
+            if copy:
+                os.remove(copy)
 
     def test_4_nombre_de_capa(self):
         doc = base_doc()
         doc.add_ocg(f"Capa {TERM}", on=True)
-        self.assertBlocked(*self.apply(self.save(doc)))
+        doc.add_ocg("Otra", on=False)
+        report, out = self.apply(self.save(doc))
+        self.assertDeliveredClean(report, out)
+        doc = fitz.open(out)
+        self.assertEqual(sorted(o["name"] for o in doc.get_ocgs().values()), ["Capa 1", "Otra"])
+        doc.close()
 
     # --- 5. Estructuras con texto libre ---
     def _structure(self, build):

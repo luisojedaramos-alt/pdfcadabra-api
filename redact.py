@@ -659,7 +659,100 @@ def remove_associated_files(doc):
 
 
 # ==========================================
-# 7. VERIFICACIÓN FINAL
+# 7. CADENAS CON UN TÉRMINO FUERA DE LA PÁGINA (capas, acciones, estructura...)
+# ==========================================
+# Se recorren los objetos con la API de MuPDF. Las cadenas se comparan con term_matcher,
+# el mismo criterio que el barrido final (objects_with_terms): lo que se limpia aquí es
+# exactamente lo que la verificación daría por fuga.
+_m = fitz.mupdf
+
+
+def _catalog(doc):
+    return _m.pdf_dict_get(_m.pdf_trailer(fitz._as_pdf_document(doc)), _m.PDF_ENUM_NAME_Root)
+
+
+def _string_bytes(obj):
+    """Bytes de una cadena PDF (pdf_to_string corta en el primer byte nulo)."""
+    src = fitz.JM_object_to_buffer(_m.pdf_resolve_indirect(obj), 1, 0).fz_buffer_extract()
+    return b"".join(_pdf_strings(src.decode("latin-1")))
+
+
+# No se sigue hacia el padre ni hacia la página: se saldría del objeto que se examina.
+_UPWARD_KEYS = {"Parent", "P"}
+
+
+def _walk_strings(obj, pages, seen):
+    """(contenedor, clave o índice, cadena) de cada cadena de obj y de lo que referencia,
+    salvo páginas y Parent/P. `seen`: números de objeto ya visitados."""
+    if _m.pdf_is_indirect(obj):
+        num = _m.pdf_to_num(obj)
+        if num in pages or num in seen:
+            return
+        seen.add(num)
+    if _m.pdf_is_array(obj):
+        for i in range(_m.pdf_array_len(obj)):
+            item = _m.pdf_array_get(obj, i)
+            if _m.pdf_is_string(item):
+                yield obj, i, item
+            else:
+                yield from _walk_strings(item, pages, seen)
+    elif _m.pdf_is_dict(obj):
+        for i in range(_m.pdf_dict_len(obj)):
+            key = _m.pdf_dict_get_key(obj, i)
+            if _m.pdf_to_name(key) in _UPWARD_KEYS:
+                continue
+            val = _m.pdf_dict_get_val(obj, i)
+            if _m.pdf_is_string(val):
+                yield obj, key, val
+            else:
+                yield from _walk_strings(val, pages, seen)
+
+
+def _has_term(obj, found, pages):
+    """¿Alguna cadena de obj, o de lo que referencia (salvo páginas y Parent/P), contiene
+    un término?"""
+    return any(found(_string_bytes(s)) for _, _, s in _walk_strings(obj, pages, set()))
+
+
+def _blank_term_strings(obj, found, pages):
+    """Vacía cada cadena con un término de obj y de lo que referencia. Devuelve cuántas."""
+    hits = [(c, k) for c, k, s in _walk_strings(obj, pages, set()) if found(_string_bytes(s))]
+    for container, key in hits:
+        empty = _m.pdf_new_text_string("")
+        if _m.pdf_is_array(container):
+            _m.pdf_array_put(container, key, empty)
+        else:
+            _m.pdf_dict_put(container, key, empty)
+    return len(hits)
+
+
+def clean_layer_names(doc, found):
+    """Capas OCG: el nombre de una capa con un término pasa a "Capa N"; cualquier otra
+    cadena con un término en /OCProperties (nombre de configuración, etiquetas de /Order,
+    /Usage de las capas...) se vacía. Devuelve cuántas cadenas cambió."""
+    pages = {p.xref for p in doc}
+    changed = layer = 0
+    for xref in range(1, doc.xref_length()):
+        try:
+            if doc.xref_get_key(xref, "Type") != ("name", "/OCG"):
+                continue
+        except Exception:
+            continue
+        layer += 1
+        ocg = _m.pdf_load_object(fitz._as_pdf_document(doc), xref)
+        name = _m.pdf_dict_gets(ocg, "Name")
+        if _m.pdf_is_string(name) and found(_string_bytes(name)):
+            _m.pdf_dict_puts(ocg, "Name", _m.pdf_new_text_string(f"Capa {layer}"))
+            changed += 1
+        changed += _blank_term_strings(ocg, found, pages)
+    ocp = _m.pdf_dict_gets(_catalog(doc), "OCProperties")
+    if _m.pdf_is_dict(ocp):
+        changed += _blank_term_strings(ocp, found, pages)
+    return changed
+
+
+# ==========================================
+# 8. VERIFICACIÓN FINAL
 # ==========================================
 def _contains_term(value, terms):
     v = norm(value if isinstance(value, str) else str(value or ""))
@@ -806,6 +899,25 @@ def _excluded_streams(doc):
 _FONT_OBJECTS = ("/Font", "/FontDescriptor", "/Encoding")
 
 
+def term_matcher(terms):
+    """Función bytes -> bool: ¿contienen esos bytes un término, sin contar guiones ni
+    espacios y en cualquiera de las lecturas de _texts? Las cadenas que escribimos nosotros
+    (OUTPUT_METADATA) no cuentan. None si no hay términos que buscar fuera de la página."""
+    compact_terms = {c for c in (_compact(t) for t in terms) if len(c) >= MIN_TERM_LEN}
+    if not compact_terms:
+        return None
+    ours = {_compact(v) for v in OUTPUT_METADATA.values()}
+
+    def found(data):
+        for text in _texts(data):
+            c = _compact(text)
+            if c and c not in ours and any(t in c for t in compact_terms):
+                return True
+        return False
+
+    return found
+
+
 def objects_with_terms(doc, terms):
     """¿Aparece un término (sin contar guiones ni espacios) en algún objeto del PDF?
 
@@ -814,18 +926,10 @@ def objects_with_terms(doc, terms):
     no son contenido de página, fuentes ni imágenes. Las cadenas que escribimos nosotros
     (OUTPUT_METADATA) no cuentan.
     """
-    compact_terms = {c for c in (_compact(t) for t in terms) if len(c) >= MIN_TERM_LEN}
-    if not compact_terms:
+    found = term_matcher(terms)
+    if found is None:
         return False
-    ours = {_compact(v) for v in OUTPUT_METADATA.values()}
     excluded = _excluded_streams(doc)
-
-    def found(data):
-        for text in _texts(data):
-            c = _compact(text)
-            if c and c not in ours and any(t in c for t in compact_terms):
-                return True
-        return False
 
     for xref in range(1, doc.xref_length()):
         try:
@@ -1093,13 +1197,27 @@ def apply(input_path, output_path, items):
 
     # Texto oculto con un término (decisión de Luis, 2026-10-07): se censura siempre,
     # porque el usuario no lo ve y no ha podido decidir dejarlo. Se busca antes de
-    # censurar, en el documento tal como lo vio el usuario.
+    # censurar, en el documento tal como lo vio el usuario. Con capas OCG, las palabras de
+    # todas las capas salen de una copia en disco sin /OCProperties (como en la verificación).
     hidden_by_page = {}
     if terms:
-        for page in doc:
-            rects = hidden_term_rects(page, page, terms)
-            if rects:
-                hidden_by_page[page.number] = rects
+        all_layers, copy_path, snapshot = doc, None, None
+        if doc.xref_get_key(doc.pdf_catalog(), "OCProperties")[0] != "null":
+            snapshot = output_path + ".pre.pdf"
+            doc.save(snapshot)
+        try:
+            if snapshot:
+                all_layers, copy_path = open_all_layers(snapshot)
+            for page in doc:
+                rects = hidden_term_rects(page, all_layers[page.number], terms)
+                if rects:
+                    hidden_by_page[page.number] = rects
+        finally:
+            if all_layers is not doc:
+                all_layers.close()
+            for p in (snapshot, copy_path):
+                if p and os.path.exists(p):
+                    os.remove(p)
 
     for page in doc:
         if page.number in zones_by_page:
@@ -1141,6 +1259,9 @@ def apply(input_path, output_path, items):
         xml_metadata=True,
     )
     remove_associated_files(doc)
+    found = term_matcher(terms)
+    if found is not None:
+        clean_layer_names(doc, found)
     doc.set_metadata({
         "creator": OUTPUT_METADATA["creator"],
         "producer": OUTPUT_METADATA["producer"],

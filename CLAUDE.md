@@ -80,7 +80,13 @@
   solo de texto: sin relleno, sin tocar imágenes ni trazos (un fondo que sale del CropBox se
   ve). Esas zonas no van a `zones_by_page`: si se llevaran texto visible, lo avisa
   `X-Redact-Text-Loss`. Las palabras llegan sin girar: la zona visible es
-  `page.rect * derotation_matrix`.
+  `page.rect * derotation_matrix`. Con capas OCG, las palabras de todas las capas salen de
+  una copia en disco (`<salida>.pre.pdf` y su `.capas.pdf`, borradas al terminar), así que
+  también se censura el texto de las capas apagadas.
+- Nombres de capa (`clean_layer_names`, tras `scrub`): una capa cuyo `/Name` contiene un
+  término pasa a llamarse "Capa N"; cualquier otra cadena con un término en
+  `/OCProperties` (nombre de configuración, etiquetas de `/Order`, `/Usage`) se vacía.
+  Mismo criterio que el barrido final (`term_matcher`).
 - Censuras fallidas (`failed` del informe, p. ej. página inexistente): si falla CUALQUIERA,
   `server.js` responde 422 `REDACT_ITEMS_FAILED` con la lista y no envía nada (desde
   2026-10-07; antes, con fallos parciales, se enviaba con `X-Redact-Warnings`, que ya no se usa).

@@ -87,6 +87,12 @@
   término pasa a llamarse "Capa N"; cualquier otra cadena con un término en
   `/OCProperties` (nombre de configuración, etiquetas de `/Order`, `/Usage`) se vacía.
   Mismo criterio que el barrido final (`term_matcher`).
+- Estructuras con texto libre (`clean_structures`, tras `scrub`, mismo criterio): marcador con
+  URI o destino con nombre con un término -> destino explícito a su página, o sin destino si
+  era una URI (el título ya lo mira `remove_outline_terms`); `/Names /Dests` -> fuera esas
+  entradas (el árbol se reescribe plano); `/OpenAction` y cada entrada de `/AA` con un término
+  -> fuera; `/PieceInfo` con un término -> fuera; `/Alt`, `/ActualText`, `/T` y `/E` con un
+  término -> cadena vacía; prefijo de `/PageLabels` -> vacío; `/I` de un `/Threads` -> fuera.
 - Censuras fallidas (`failed` del informe, p. ej. página inexistente): si falla CUALQUIERA,
   `server.js` responde 422 `REDACT_ITEMS_FAILED` con la lista y no envía nada (desde
   2026-10-07; antes, con fallos parciales, se enviaba con `X-Redact-Warnings`, que ya no se usa).

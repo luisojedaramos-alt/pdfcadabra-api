@@ -269,37 +269,71 @@ class LeakTests(Base):
         def build(doc):
             dest = new_object(doc, f"[{doc[0].xref} 0 R /XYZ 0 0 0]")
             doc.xref_set_key(doc.pdf_catalog(), "Names", f"<</Dests<</Names[({TERM}) {dest} 0 R]>>>>")
-        self.assertBlocked(*self._structure(build))
+        self.assertDeliveredClean(*self._structure(build))
+
+    def test_5_dests_conserva_los_neutros_y_el_marcador_su_pagina(self):
+        doc = base_doc(pages=2)
+        d0 = new_object(doc, f"[{doc[0].xref} 0 R /XYZ 0 0 0]")
+        d1 = new_object(doc, f"[{doc[1].xref} 0 R /XYZ 0 0 0]")
+        kids = [new_object(doc, f"<</Names[(a-neutro) {d0} 0 R]/Limits[(a-neutro)(a-neutro)]>>"),
+                new_object(doc, f"<</Names[({TERM}) {d1} 0 R]/Limits[({TERM})({TERM})]>>")]
+        doc.xref_set_key(doc.pdf_catalog(), "Names", f"<</Dests<</Kids[{kids[0]} 0 R {kids[1]} 0 R]>>>>")
+        doc.set_toc([[1, "Neutro", 2]])
+        outline = doc.get_toc(simple=False)[0][3]["xref"]
+        doc.xref_set_key(outline, "Dest", f"({TERM})")
+        report, out = self.apply(self.save(doc))
+        self.assertDeliveredClean(report, out)
+        doc = fitz.open(out)
+        self.assertEqual(list(doc.resolve_names()), ["a-neutro"])
+        self.assertEqual([e[:3] for e in doc.get_toc()], [[1, "Neutro", 2]])
+        doc.close()
+
+    def test_5_aa_quita_solo_las_entradas_con_el_termino(self):
+        doc = base_doc()
+        bad = new_object(doc, f"<</S/URI/URI(https://x.es/{TERM})>>")
+        ok = new_object(doc, "<</S/URI/URI(https://x.es/neutro)>>")
+        doc.xref_set_key(doc[0].xref, "AA", f"<</O {bad} 0 R/C {ok} 0 R>>")
+        report, out = self.apply(self.save(doc))
+        self.assertDeliveredClean(report, out)
+        doc = fitz.open(out)
+        aa = doc.xref_get_key(doc[0].xref, "AA")
+        self.assertNotIn("/O", aa[1])
+        self.assertIn("/C", aa[1])
+        doc.close()
 
     def test_5_aa_de_pagina_uri(self):
         def build(doc):
             uri = new_object(doc, f"<</S/URI/URI(https://x.es/{TERM})>>")
             doc.xref_set_key(doc[0].xref, "AA", f"<</O {uri} 0 R>>")
-        self.assertBlocked(*self._structure(build))
+        self.assertDeliveredClean(*self._structure(build))
 
     def test_5_openaction_uri(self):
         def build(doc):
             uri = new_object(doc, f"<</S/URI/URI(https://x.es/{TERM})>>")
             doc.xref_set_key(doc.pdf_catalog(), "OpenAction", f"{uri} 0 R")
-        self.assertBlocked(*self._structure(build))
+        self.assertDeliveredClean(*self._structure(build))
 
     def test_5_pieceinfo(self):
         def build(doc):
             doc.xref_set_key(doc[0].xref, "PieceInfo", f"<</App<</Private({TERM})>>>>")
-        self.assertBlocked(*self._structure(build))
+        self.assertDeliveredClean(*self._structure(build))
 
     def test_5_marcador_neutro_con_uri(self):
         def build(doc):
             doc.set_toc([[1, "Neutro", 1]])
             doc.set_toc_item(0, kind=fitz.LINK_URI, uri=f"https://x.es/{TERM}")
-        self.assertBlocked(*self._structure(build))
+        report, out = self._structure(build)
+        self.assertDeliveredClean(report, out)
+        doc = fitz.open(out)
+        self.assertEqual([e[1] for e in doc.get_toc()], ["Neutro"])  # el marcador se queda
+        doc.close()
 
     def test_5_structtree_alt_actualtext(self):
         def build(doc):
             se = new_object(doc, f"<</Type/StructElem/S/Figure/Alt({TERM})/ActualText({TERM})>>")
             st = new_object(doc, f"<</Type/StructTreeRoot/K {se} 0 R>>")
             doc.xref_set_key(doc.pdf_catalog(), "StructTreeRoot", f"{st} 0 R")
-        self.assertBlocked(*self._structure(build))
+        self.assertDeliveredClean(*self._structure(build))
 
     def test_5_structtree_en_utf16_hex(self):
         def build(doc):
@@ -307,17 +341,17 @@ class LeakTests(Base):
             se = new_object(doc, f"<</Type/StructElem/S/Figure/Alt<{alt}>>>")
             st = new_object(doc, f"<</Type/StructTreeRoot/K {se} 0 R>>")
             doc.xref_set_key(doc.pdf_catalog(), "StructTreeRoot", f"{st} 0 R")
-        self.assertBlocked(*self._structure(build))
+        self.assertDeliveredClean(*self._structure(build))
 
     def test_5_variante_con_guiones_y_espacios(self):
         def build(doc):
             doc.xref_set_key(doc[0].xref, "PieceInfo", "<</App<</Private(SECRETO 77-31)>>>>")
-        self.assertBlocked(*self._structure(build))
+        self.assertDeliveredClean(*self._structure(build))
 
     def test_5_pagelabels(self):
         def build(doc):
             doc.set_page_labels([{"startpage": 0, "prefix": f"{TERM}-", "style": "D"}])
-        self.assertBlocked(*self._structure(build))
+        self.assertDeliveredClean(*self._structure(build))
 
     def test_5_threads(self):
         def build(doc):
@@ -325,7 +359,7 @@ class LeakTests(Base):
             thread = new_object(doc, f"<</Type/Thread/I<</Title({TERM})>>/F {bead} 0 R>>")
             doc.update_object(bead, f"<</T {thread} 0 R/P {doc[0].xref} 0 R/R[0 0 10 10]/N {bead} 0 R/V {bead} 0 R>>")
             doc.xref_set_key(doc.pdf_catalog(), "Threads", f"[{thread} 0 R]")
-        self.assertBlocked(*self._structure(build))
+        self.assertDeliveredClean(*self._structure(build))
 
     # --- 7. Rectángulos inválidos ---
     def _bad_rect(self, transform):

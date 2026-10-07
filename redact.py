@@ -711,6 +711,8 @@ def _walk_strings(obj, pages, seen):
 def _has_term(obj, found, pages):
     """¿Alguna cadena de obj, o de lo que referencia (salvo páginas y Parent/P), contiene
     un término?"""
+    if _m.pdf_is_string(obj):  # p. ej. un destino con nombre: /Dest (nombre)
+        return found(_string_bytes(obj))
     return any(found(_string_bytes(s)) for _, _, s in _walk_strings(obj, pages, set()))
 
 
@@ -748,6 +750,141 @@ def clean_layer_names(doc, found):
     ocp = _m.pdf_dict_gets(_catalog(doc), "OCProperties")
     if _m.pdf_is_dict(ocp):
         changed += _blank_term_strings(ocp, found, pages)
+    return changed
+
+
+def _clean_outline_targets(doc, found, pages):
+    """Marcadores (el título ya lo mira remove_outline_terms) cuya acción o destino tiene un
+    término: una URI, o un destino con nombre. Si apuntaban a una página, pasan a un destino
+    explícito a esa página; si no (URI), se quedan sin destino."""
+    pdf = fitz._as_pdf_document(doc)
+    changed = 0
+    for idx, (_, _, pno, dest) in enumerate(doc.get_toc(simple=False)):
+        item = _m.pdf_load_object(pdf, dest["xref"])
+        targets = [_m.pdf_dict_gets(item, k) for k in ("A", "Dest")]
+        if not any(_has_term(t, found, pages) for t in targets if not _m.pdf_is_null(t)):
+            continue
+        # set_toc_item escribe /A pero no quita /Dest, que tiene prioridad: fuera las dos.
+        _m.pdf_dict_dels(item, "A")
+        _m.pdf_dict_dels(item, "Dest")
+        if pno >= 1 and dest.get("kind") in (fitz.LINK_GOTO, fitz.LINK_NAMED):
+            doc.set_toc_item(idx, kind=fitz.LINK_GOTO, pno=pno, to=dest.get("to"))
+        else:
+            doc.set_toc_item(idx, kind=fitz.LINK_NONE)
+        changed += 1
+    return changed
+
+
+def _clean_named_dests(doc, found, pages):
+    """Quita de /Names /Dests los destinos cuyo nombre tiene un término. Si quita alguno, el
+    árbol se reescribe plano (una sola hoja con los que quedan, en el mismo orden)."""
+    names = _m.pdf_dict_gets(_catalog(doc), "Names")
+    dests = _m.pdf_dict_gets(names, "Dests")
+    if not _m.pdf_is_dict(dests):
+        return 0
+    kept, removed, seen = [], 0, set()
+
+    def walk(node):
+        nonlocal removed
+        if _m.pdf_is_indirect(node):
+            if _m.pdf_to_num(node) in seen:
+                return
+            seen.add(_m.pdf_to_num(node))
+        kids = _m.pdf_dict_gets(node, "Kids")
+        for i in range(_m.pdf_array_len(kids)):
+            walk(_m.pdf_array_get(kids, i))
+        pairs = _m.pdf_dict_gets(node, "Names")
+        for i in range(0, _m.pdf_array_len(pairs) - 1, 2):
+            key, val = _m.pdf_array_get(pairs, i), _m.pdf_array_get(pairs, i + 1)
+            if (_m.pdf_is_string(key) and found(_string_bytes(key))) or _has_term(val, found, pages):
+                removed += 1
+            else:
+                kept.append((key, val))
+
+    walk(dests)
+    if removed:
+        pdf = fitz._as_pdf_document(doc)
+        flat = _m.pdf_new_array(pdf, 2 * len(kept))
+        for key, val in kept:
+            _m.pdf_array_push(flat, key)
+            _m.pdf_array_push(flat, val)
+        root = _m.pdf_new_dict(pdf, 1)
+        _m.pdf_dict_puts(root, "Names", flat)
+        _m.pdf_dict_puts(names, "Dests", root)
+    return removed
+
+
+def _clean_page_labels(doc, found):
+    """Etiquetas de página (/PageLabels) con un término en el prefijo: prefijo vacío."""
+    labels = doc.get_page_labels()
+    hits = [lab for lab in labels if found(lab.get("prefix", "").encode("utf-8"))]
+    for lab in hits:
+        lab["prefix"] = ""
+    if hits:
+        doc.set_page_labels(labels)
+    return len(hits)
+
+
+def _clean_threads(doc, found, pages):
+    """Artículos (/Threads): quita el diccionario de información (/I: título, autor...) del
+    que tenga un término."""
+    threads = _m.pdf_dict_gets(_catalog(doc), "Threads")
+    changed = 0
+    for i in range(_m.pdf_array_len(threads)):
+        thread = _m.pdf_array_get(threads, i)
+        info = _m.pdf_dict_gets(thread, "I")
+        if not _m.pdf_is_null(info) and _has_term(info, found, pages):
+            _m.pdf_dict_dels(thread, "I")
+            changed += 1
+    return changed
+
+
+# Texto de la estructura lógica (StructElem): texto alternativo, texto real, título y
+# expansión de una abreviatura. Se vacían.
+_STRUCT_TEXT_KEYS = ("Alt", "ActualText", "T", "E")
+
+
+def clean_structures(doc, found):
+    """Quita o vacía lo que contenga un término en: destinos y URI de los marcadores,
+    /Names /Dests, /OpenAction, /AA (acciones de catálogo, página, anotación o campo),
+    /PieceInfo, texto de la estructura lógica (/Alt, /ActualText, /T, /E), /PageLabels y
+    /Threads. Devuelve cuántos cambios hizo."""
+    pages = {p.xref for p in doc}
+    pdf = fitz._as_pdf_document(doc)
+    changed = _clean_outline_targets(doc, found, pages)
+    changed += _clean_named_dests(doc, found, pages)
+    changed += _clean_page_labels(doc, found)
+    changed += _clean_threads(doc, found, pages)
+    cat = _catalog(doc)
+    action = _m.pdf_dict_gets(cat, "OpenAction")
+    if not _m.pdf_is_null(action) and _has_term(action, found, pages):
+        _m.pdf_dict_dels(cat, "OpenAction")
+        changed += 1
+    for xref in range(1, doc.xref_length()):
+        try:
+            obj = _m.pdf_load_object(pdf, xref)
+        except Exception:
+            continue
+        if not _m.pdf_is_dict(obj):
+            continue
+        aa = _m.pdf_dict_gets(obj, "AA")
+        if _m.pdf_is_dict(aa):
+            triggers = [_m.pdf_dict_get_key(aa, i) for i in range(_m.pdf_dict_len(aa))]
+            for trigger in triggers:
+                if _has_term(_m.pdf_dict_get(aa, trigger), found, pages):
+                    _m.pdf_dict_del(aa, trigger)
+                    changed += 1
+            if _m.pdf_dict_len(aa) == 0:
+                _m.pdf_dict_dels(obj, "AA")
+        piece = _m.pdf_dict_gets(obj, "PieceInfo")
+        if not _m.pdf_is_null(piece) and _has_term(piece, found, pages):
+            _m.pdf_dict_dels(obj, "PieceInfo")
+            changed += 1
+        for key in _STRUCT_TEXT_KEYS:
+            val = _m.pdf_dict_gets(obj, key)
+            if _m.pdf_is_string(val) and found(_string_bytes(val)):
+                _m.pdf_dict_puts(obj, key, _m.pdf_new_text_string(""))
+                changed += 1
     return changed
 
 
@@ -1262,6 +1399,7 @@ def apply(input_path, output_path, items):
     found = term_matcher(terms)
     if found is not None:
         clean_layer_names(doc, found)
+        clean_structures(doc, found)
     doc.set_metadata({
         "creator": OUTPUT_METADATA["creator"],
         "producer": OUTPUT_METADATA["producer"],

@@ -881,19 +881,51 @@ class VectorTests(Base):
         self.assertColor(self._pixel(out, 100, 100), (217, 230, 255))
         self.assertColor(self._pixel(out, 700, 500), (217, 230, 255))
 
-    def test_relleno_que_tapaba_texto_no_se_repinta_debajo(self):
-        """Un rectángulo puesto encima de un texto para taparlo, repintado debajo, lo
-        destaparía: ese no se repinta (se quita, como con REMOVE_IF_TOUCHED solo)."""
+    # --- Censura falsa: un relleno que tapaba algo se repinta encima ---
+    def _render(self, path, clip):
+        doc = fitz.open(path)
+        pix = doc[0].get_pixmap(dpi=144, clip=clip)
+        doc.close()
+        return pix
+
+    def test_censura_falsa_rozada_sigue_tapando(self):
+        """Un texto tapado con un rectángulo negro que la zona roza sigue sin verse."""
         doc = base_doc()
         page = doc[0]
-        page.insert_text((250, 100), "tapado", fontsize=12)
-        self._rect(page, fitz.Rect(240, 85, 320, 110), (1, 1, 0))  # amarillo encima de "tapado"
+        page.insert_text((250, 100), "DNI 12345678Z", fontsize=12)
+        self._rect(page, fitz.Rect(240, 85, 360, 110), (0, 0, 0))
+        path = self.save(doc)
+        report, out = self.apply(path, [manual(0, fitz.Rect(70, 85, 245, 110))])
+        self.assertTrue(server_delivers(report), report)
+        box = fitz.Rect(240, 85, 360, 110)
+        pix = self._render(out, box)
+        self.assertEqual({pix.pixel(x, y) for x in range(pix.width) for y in range(pix.height)}, {(0, 0, 0)})
+        self.assertEqual(self._render(path, box).samples, pix.samples)
+
+    def test_censura_falsa_con_opacidad_igual_que_el_original(self):
+        """Con su color y su opacidad: la parte fuera de la zona se ve como en el original."""
+        doc = base_doc()
+        page = doc[0]
+        page.insert_text((250, 100), "dato", fontsize=12)
+        self._rect(page, fitz.Rect(240, 85, 320, 110), (1, 1, 0), opacity=0.6)
+        path = self.save(doc)
+        report, out = self.apply(path, [manual(0, fitz.Rect(70, 85, 245, 110))])
+        self.assertTrue(server_delivers(report), report)
+        outside = fitz.Rect(246, 85, 320, 110)
+        self.assertEqual(self._render(path, outside).samples, self._render(out, outside).samples)
+        self.assertEqual(self._pixel(out, 242, 97), (0, 0, 0))  # el negro de la zona, encima
+
+    def test_censura_falsa_con_algo_dibujado_despues(self):
+        """Lo que se le dibujaba encima queda tapado: el documento nunca queda menos tapado."""
+        doc = base_doc()
+        page = doc[0]
+        page.insert_text((250, 100), "DNI 12345678Z", fontsize=12)
+        self._rect(page, fitz.Rect(240, 85, 360, 110), (0, 0, 0))
+        page.insert_text((300, 100), "etiqueta", fontsize=8, color=(1, 1, 1))  # encima del negro
         report, out = self.apply(self.save(doc), [manual(0, fitz.Rect(70, 85, 245, 110))])
         self.assertTrue(server_delivers(report), report)
-        out_doc = fitz.open(out)
-        self.assertFalse([d for d in out_doc[0].get_drawings() if d.get("fill") == (1.0, 1.0, 0.0)])
-        out_doc.close()
-
+        pix = self._render(out, fitz.Rect(240, 85, 360, 110))
+        self.assertEqual({pix.pixel(x, y) for x in range(pix.width) for y in range(pix.height)}, {(0, 0, 0)})
 
 if __name__ == "__main__":
     unittest.main()

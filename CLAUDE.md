@@ -110,7 +110,13 @@
   (`overlay=False`) los que `apply_redactions` ha quitado. No se guardan los que están bajo un
   recorte no rectangular o en un grupo transparente, ni los que tapaban algo dibujado antes
   (orden de `get_bboxlog`, cuyo índice es el `seqno` de `get_drawings`): repintados debajo,
-  destaparían lo que ocultaban; esos se quitan como antes.
+  destaparían lo que ocultaban.
+- Censura falsa (decisión de Luis, 2026-10-07): un relleno liso que tapaba algo dibujado antes
+  se repinta ENCIMA de todo, en su sitio, con su color y su opacidad, y sobre él otra vez el
+  negro de las zonas que toca: el documento nunca queda menos tapado que el original, aunque
+  así tape también lo que se le dibujaba encima. El orden de dibujo sale de
+  `_content_bboxlog` (solo el contenido: `get_bboxlog` incluye la anotación de censura ya
+  puesta). Solo rectángulos lisos: una firma o un sello rellenos que tapan texto se quitan.
 - Adjuntos por `/AF` (PDF/A-3, Factur-X): tras `scrub`, `remove_associated_files` quita la
   clave `/AF` de todos los objetos, igual que `scrub(embedded_files=True)` vacía el árbol de
   nombres; el Filespec y su flujo quedan huérfanos y `save(garbage=4)` los elimina.

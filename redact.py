@@ -8,7 +8,7 @@ import sys
 import unicodedata
 import uuid
 import zlib
-from collections import Counter
+from collections import Counter, namedtuple
 
 import pymupdf as fitz
 
@@ -900,8 +900,12 @@ def clean_structures(doc, found):
 # quitando.
 #
 # Solo se repinta debajo un relleno que no tapaba nada de lo dibujado antes (salvo otros
-# rellenos que también se repintan y lo que cae entero dentro de una zona): repintado debajo,
-# un rectángulo puesto encima de un texto o una imagen para taparlo lo destaparía.
+# rellenos que también se repintan debajo y lo que cae entero dentro de una zona). Uno que sí
+# tapaba algo (decisión de Luis, 2026-10-07: censura falsa, un rectángulo puesto encima de un
+# dato para ocultarlo) se repinta ENCIMA de todo, en su sitio, con su color y su opacidad:
+# el documento nunca queda menos tapado que el original, aunque así tape también lo que se
+# le dibujaba encima. El negro de las zonas que toca se vuelve a pintar sobre él. Solo
+# rectángulos lisos: una firma o un sello rellenos que tapan texto se siguen quitando.
 
 def _path_rects(items):
     """Rectángulos (sin girar) que forman el trazado, o None si no es solo rectángulos
@@ -923,17 +927,40 @@ def _path_rects(items):
     return [fitz.Rect(min(xs), min(ys), max(xs), max(ys))]
 
 
+def _content_bboxlog(page):
+    """Como page.get_bboxlog() (orden de dibujo, sin girar), pero solo del contenido de la
+    página: get_bboxlog incluye las anotaciones, y la de censura que ya hemos puesto
+    parecería dibujada encima de todo lo que toca."""
+    rotation = page.rotation
+    if rotation:
+        page.set_rotation(0)
+    log = []
+    try:
+        dev = fitz.JM_new_bbox_device(log, False)
+        _m.fz_run_page_contents(page.this, dev, _m.FzMatrix(), _m.FzCookie())
+        _m.fz_close_device(dev)
+    finally:
+        if rotation:
+            page.set_rotation(rotation)
+    return log
+
+
 def _fill_key(path):
     return (tuple(round(v, 1) for v in path["rect"]), path["fill"], round(path.get("fill_opacity") or 1, 3))
 
 
+# Relleno liso guardado antes de censurar. over: tapaba algo dibujado antes y se repinta
+# encima; later: además, algo dibujado después se le superpone (queda tapado).
+SavedFill = namedtuple("SavedFill", "key rects color opacity over later")
+
+
 def solid_fills_touching(page, zones):
-    """Rellenos lisos que tocan una zona y se pueden repintar debajo, en orden de dibujo:
-    [(clave, rectángulos ya recortados, color, opacidad)]."""
+    """Rellenos lisos que tocan una zona y se pueden repintar, en orden de dibujo
+    ([SavedFill], con los rectángulos ya recortados)."""
     if not zones:
         return []
     index = ZoneIndex(zones)
-    log = page.get_bboxlog()
+    log = _content_bboxlog(page)
     stack = []  # recortes y grupos activos: (nivel, entrada)
     candidates = []
     for path in page.get_drawings(extended=True):
@@ -967,47 +994,61 @@ def solid_fills_touching(page, zones):
             continue
         candidates.append((seqno, _fill_key(path), rects, path["fill"], opacity))
     # ¿Tapaba algo dibujado antes? Lo que cae entero dentro de una zona desaparece igual, y el
-    # texto invisible (capa OCR) no se ve.
-    kept, safe = set(), []
-    for seqno, key, rects, color, opacity in candidates:
-        covers = False
-        for i in range(seqno):
+    # texto invisible (capa OCR) no se ve. Si tapaba algo, va encima (censura falsa: un
+    # rectángulo puesto sobre un dato para ocultarlo); si no, debajo.
+    def overlapping(indexes, rects, skip):
+        for i in indexes:
             kind, bbox = log[i]
-            if i in kept or kind == "ignore-text":
+            if i in skip or kind == "ignore-text":
                 continue
             box = fitz.Rect(bbox)
             if box.is_empty or not any(box.intersects(r) for r in rects):
                 continue
             if any(z.contains(box) for z in index.candidates(box.y0, box.y1)):
                 continue
-            covers = True
-            break
-        if not covers:
-            kept.add(seqno)
-            safe.append((key, rects, color, opacity))
-    return safe
+            yield i
+
+    under, saved = set(), []
+    for seqno, key, rects, color, opacity in candidates:
+        if next(overlapping(range(seqno), rects, under), None) is None:
+            under.add(seqno)
+            saved.append(SavedFill(key, rects, color, opacity, False, False))
+        else:
+            # Lo dibujado después que se le superpone queda tapado al repintarlo encima.
+            later = next(overlapping(range(seqno + 1, len(log)), rects, ()), None) is not None
+            saved.append(SavedFill(key, rects, color, opacity, True, later))
+    return saved
 
 
-def restore_fills(page, saved):
-    """Vuelve a pintar debajo de todo los rellenos de `saved` que apply_redactions ha
-    quitado. Devuelve cuántos."""
+def restore_fills(page, saved, zones):
+    """Vuelve a pintar los rellenos de `saved` que apply_redactions ha quitado: debajo de
+    todo, o encima de todo los que tapaban algo dibujado antes, para que el documento nunca
+    quede menos tapado que el original. Sobre estos últimos se vuelve a pintar el negro de
+    las zonas que tocan. Devuelve cuántos repintó."""
     if not saved:
         return 0
     remaining = Counter(_fill_key(p) for p in page.get_drawings() if p["type"] == "f" and p.get("fill") is not None)
     missing = []
-    for key, rects, color, opacity in saved:
-        if remaining[key]:
-            remaining[key] -= 1
+    for fill in saved:
+        if remaining[fill.key]:
+            remaining[fill.key] -= 1
         else:
-            missing.append((rects, color, opacity))
-    if not missing:
-        return 0
-    shape = page.new_shape()
-    for rects, color, opacity in missing:
-        for r in rects:
-            shape.draw_rect(r)
-        shape.finish(fill=color, color=None, fill_opacity=opacity, width=0)
-    shape.commit(overlay=False)
+            missing.append(fill)
+    for over in (False, True):
+        fills = [f for f in missing if f.over == over]
+        if not fills:
+            continue
+        shape = page.new_shape()
+        for f in fills:
+            for r in f.rects:
+                shape.draw_rect(r)
+            shape.finish(fill=f.color, color=None, fill_opacity=f.opacity, width=0)
+        if over:
+            for z in zones:
+                if any(z.intersects(r) for f in fills for r in f.rects):
+                    shape.draw_rect(z)
+                    shape.finish(fill=(0, 0, 0), color=None, width=0)
+        shape.commit(overlay=over)
     return len(missing)
 
 
@@ -1491,7 +1532,7 @@ def apply(input_path, output_path, items):
             fills = solid_fills_touching(page, zones_by_page[page.number])
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS,
                                   graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED)
-            restore_fills(page, fills)
+            restore_fills(page, fills, zones_by_page[page.number])
             recompress_redacted_images(doc, page, before)
         if page.number in hidden_by_page:
             # Solo el texto y sin relleno: la zona no se ve, y no debe tocar imágenes ni

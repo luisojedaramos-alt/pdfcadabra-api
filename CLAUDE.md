@@ -47,7 +47,7 @@
 
 - Orden de `apply`: (1) reescribe los operadores `'` y `"` como `T* … Tj` en contenidos
   de página y Form XObjects; (2) aplana campos y anotaciones (`doc.bake`) y quita el
-  `/AcroForm`; (3) censura con `PDF_REDACT_IMAGE_PIXELS`; (4) quita los marcadores que
+  `/AcroForm`; (3) censura con `PDF_REDACT_IMAGE_PIXELS` y `PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED`; (4) quita los marcadores que
   contienen un término; (5) `doc.scrub()`; (6) guarda y vuelve a buscar en la salida.
 - (1) se hace sobre el contenido de la página ya unido (el operando de un `'` puede estar en un
   flujo de `/Contents` y el operador en el siguiente; si alguno cruza, la página pasa a un único
@@ -100,6 +100,11 @@
   rectángulo invertido, vacío o que no toca la página (MuPDF los aceptaba sin tapar nada).
   Los rectángulos llegan sin girar, como los da `search_for`: se comparan con
   `page.rect * page.derotation_matrix`. Uno que sale en parte de la página sí vale.
+- Trazos (decisión de Luis, 2026-10-07): `REMOVE_IF_TOUCHED` quita entero todo trazo que
+  toque una zona (antes, `REMOVE_IF_COVERED`, una firma que entraba y salía quedaba bajo el
+  negro). Se aceptan las líneas de tabla que rocen la zona. Ojo: también un relleno (fondo de
+  página completa, sombreado de celda, relleno con patrón) que la zona toque desaparece
+  entero; el texto que perdiera un patrón lo avisa `X-Redact-Text-Loss`.
 - Adjuntos por `/AF` (PDF/A-3, Factur-X): tras `scrub`, `remove_associated_files` quita la
   clave `/AF` de todos los objetos, igual que `scrub(embedded_files=True)` vacía el árbol de
   nombres; el Filespec y su flujo quedan huérfanos y `save(garbage=4)` los elimina.

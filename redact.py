@@ -1360,8 +1360,13 @@ def apply(input_path, output_path, items):
         if page.number in zones_by_page:
             # CRÍTICO: images=fitz.PDF_REDACT_IMAGE_PIXELS garantiza la destrucción
             # a nivel de píxel del escaneo subyacente. No se puede recuperar el dato tapado.
+            # Trazos (decisión de Luis, 2026-10-07): fuera todo trazo que toque una zona, no
+            # solo los que cubre entera (por defecto, REMOVE_IF_COVERED dejaba bajo el negro
+            # una firma que entra y sale de la zona). Se acepta perder las líneas de tabla
+            # que rocen la zona.
             before = _image_slots(page)
-            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS,
+                                  graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED)
             recompress_redacted_images(doc, page, before)
         if page.number in hidden_by_page:
             # Solo el texto y sin relleno: la zona no se ve, y no debe tocar imágenes ni

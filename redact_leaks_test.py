@@ -708,9 +708,17 @@ class CorrectTests(Base):
     def test_patron_cubierto_entero(self):
         self.assertDeliveredClean(*self.apply(self._pattern_doc(), [manual(0, fitz.Rect(72, 100, 372, 140))]))
 
-    def test_patron_cubierto_en_parte_no_se_entrega(self):
+    def test_patron_cubierto_en_parte_se_quita_entero(self):
+        """El relleno con patrón es un trazo: con REMOVE_IF_TOUCHED (fase 2) se quita entero
+        si la zona lo roza, también la parte de fuera, que se avisa como texto perdido.
+        Antes quedaba con el término dentro del patrón y no se entregaba (422)."""
         report, out = self.apply(self._pattern_doc(), [manual(0, fitz.Rect(72, 100, 250, 140))])
-        self.assertBlocked(report, out)
+        self.assertTrue(server_delivers(report), report)
+        self.assertFalse(term_anywhere(out))
+        self.assertEqual(report.get("text_loss_pages"), [1])
+        doc = fitz.open(out)
+        self.assertIn(CONTROL, doc[0].get_text())
+        doc.close()
 
     # --- Revisiones incrementales, huérfanos y object streams ---
     def test_revision_incremental(self):
@@ -752,12 +760,12 @@ class CorrectTests(Base):
 
 
 # ==========================================
-# HUECOS CONOCIDOS (fase posterior)
+# TRAZOS VECTORIALES
 # ==========================================
-class KnownGapTests(Base):
-    @unittest.expectedFailure
+class VectorTests(Base):
     def test_6_firma_vectorial_cubierta_en_parte(self):
-        """Hallazgo 6: un trazo que entra y sale de la zona queda entero bajo el negro."""
+        """Hallazgo 6: un trazo que entra y sale de la zona quedaba entero bajo el negro.
+        Desde la fase 2 (REMOVE_IF_TOUCHED) se quita entero."""
         doc = fitz.open()
         page = doc.new_page()
         page.insert_text((72, 300), CONTROL, fontsize=12)

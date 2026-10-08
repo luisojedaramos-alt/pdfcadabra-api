@@ -213,3 +213,10 @@
   subprocesos, así que no quedan nietos huérfanos. Medido antes: gs seguía 16 s y
   redact.py 52 s tras el corte, ocupando su hueco. Test en `disconnect.test.js`
   (procesos reales que no terminan).
+- Cola llena antes del cuerpo (`admitUpload`, antes de multer en las tres rutas POST): si
+  las subidas en curso más las peticiones en cola o ejecutando (`heavyLimiter.load()`)
+  llegan a `capacity` (HEAVY_MAX_CONCURRENT + HEAVY_MAX_QUEUE, 11 en el servidor), 503
+  `QUEUE_FULL` con `Retry-After: 10` y `Connection: close` sin leer el cuerpo. La subida
+  deja de contar al entrar en heavyGate (pasa a contar en el limiter) o al cerrarse.
+  Medido antes: cada 503 llegaba tras recibir el archivo entero, y unas 35 subidas de
+  90 MB llenaban el tmpfs (ENOSPC, 500 genérico). Test en `admission.test.js`.

@@ -90,7 +90,12 @@ function createLimiter({ maxConcurrent, maxQueue, queueTimeoutMs }) {
         return { state: 'running' };
     };
 
-    return { acquire, cancel, has, getStatus };
+    // Peticiones en cola o ejecutando, y cuántas caben en total: server.js las usa para
+    // rechazar una subida antes de recibirla si ya no habría sitio.
+    const load = () => tickets.size;
+    const capacity = maxConcurrent + maxQueue;
+
+    return { acquire, cancel, has, getStatus, load, capacity };
 }
 
 module.exports = { createLimiter, QueueError };

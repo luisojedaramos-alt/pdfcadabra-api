@@ -192,7 +192,10 @@ const heavyGate = async (req, res, next) => {
     });
 
     try {
-        req.releaseSlot = await heavyLimiter.acquire(id);
+        const acquiring = heavyLimiter.acquire(id);
+        // Ya cuenta en el limiter (acquire lo registra al momento): deja de contar como subida.
+        req.endUpload();
+        req.releaseSlot = await acquiring;
     } catch (err) {
         if (err.code === 'CANCELLED') return; // cliente ya desconectado; el borrado lo hizo el 'close'
         secureCleanup([req.file.path]);
@@ -220,6 +223,28 @@ const abortHeavy = (req) => {
     for (const child of children) child.kill('SIGKILL');
     if (req.releaseSlot) req.releaseSlot();
     if (children.length > 0) console.warn(`Cliente desconectado: ${children.length} proceso(s) terminado(s).`);
+};
+
+// Va ANTES de multer: si las subidas en curso más las peticiones en cola o ejecutando ya
+// llenan la cola, responde 503 QUEUE_FULL sin leer el cuerpo (Connection: close). Antes el
+// 503 llegaba tras recibir el archivo entero (45 s y 90 MB por cada uno en las pruebas de
+// carga) y con unas 35 subidas de 90 MB a la vez se llenaba /tmp (ENOSPC, 500 genérico).
+// La subida deja de contar al llegar a heavyGate (pasa a contar en el limiter) o al cerrarse.
+let uploadsInProgress = 0;
+const admitUpload = (req, res, next) => {
+    if (uploadsInProgress + heavyLimiter.load() >= heavyLimiter.capacity) {
+        res.set({ 'Retry-After': String(RETRY_AFTER_SECONDS), Connection: 'close' });
+        return res.status(503).json({ code: 'QUEUE_FULL', error: QUEUE_ERRORS.QUEUE_FULL });
+    }
+    uploadsInProgress++;
+    let counted = true;
+    req.endUpload = () => {
+        if (!counted) return;
+        counted = false;
+        uploadsInProgress--;
+    };
+    res.once('close', req.endUpload);
+    next();
 };
 
 // Lanza el proceso hijo con timeout.
@@ -281,7 +306,7 @@ app.get('/v1/queue/status/:id', (req, res) => {
 // ==========================================
 // MÓDULO 1: CENSURA - BÚSQUEDA
 // ==========================================
-app.post('/v1/redact/search', upload.single('file'), heavyGate, (req, res) => {
+app.post('/v1/redact/search', admitUpload, upload.single('file'), heavyGate, (req, res) => {
     if (!req.file || !req.body.patterns) {
         secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
         return res.status(400).json({ error: 'Falta el archivo o los patrones.' });
@@ -323,7 +348,7 @@ app.post('/v1/redact/search', upload.single('file'), heavyGate, (req, res) => {
 // ==========================================
 // MÓDULO 2: CENSURA - DESTRUCCIÓN Y APLICACIÓN
 // ==========================================
-app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
+app.post('/v1/redact/apply', admitUpload, upload.single('file'), heavyGate, (req, res) => {
     if (!req.file || !req.body.items) {
         secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
         return res.status(400).json({ error: 'Falta el archivo o los hallazgos.' });
@@ -481,7 +506,7 @@ const compressArgs = ({ pdfSettings, colorDpi, jpegQFactor }, inputPath, outputP
     ];
 };
 
-app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
+app.post('/v1/compress', admitUpload, upload.single('file'), heavyGate, (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No se ha subido ningún archivo.' });
     }

@@ -56,6 +56,11 @@
   corre antes que las rutas, y multer borra el parcial de `pdfcadabra-uploads`
   él mismo antes de llamar al handler (verificado en local con 101 MB; hoy el
   límite es de 20 MB, ver Protección de la API).
+- Subida cortada por el cliente (multer pasa "Request aborted"/"Request closed" o el
+  error del socket): si el cuerpo está incompleto y el socket cerrado, solo un aviso
+  `Subida cortada por el cliente.` y ninguna respuesta. Cualquier otro error, también de
+  multer con la conexión abierta, sigue saliendo como `Error no gestionado`. Test en
+  `upload-aborted.test.js`.
 
 # Anonimizar (redact.py)
 

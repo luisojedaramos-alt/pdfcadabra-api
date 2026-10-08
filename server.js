@@ -786,6 +786,14 @@ app.use((err, req, res, next) => {
         }
         return res.status(400).json({ error: 'UPLOAD_ERROR', message: 'No se ha podido procesar el archivo subido.' });
     }
+    // Cliente que corta la conexión a mitad de la subida: multer pasa "Request aborted" o
+    // "Request closed" (o el error del socket), y ya ha borrado el parcial. No es un error
+    // del servidor y no queda a quién responder. Solo cuando la conexión está cerrada y el
+    // cuerpo incompleto: cualquier otro error, también de multer, sigue siendo un error.
+    if (!req.complete && req.socket.destroyed) {
+        console.warn('Subida cortada por el cliente.');
+        return;
+    }
     console.error('Error no gestionado:', describeError(err));
     const status = err.status || err.statusCode || 500;
     res.status(status).json({ error: 'Solicitud no permitida' });

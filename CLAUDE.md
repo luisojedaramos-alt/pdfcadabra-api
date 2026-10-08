@@ -25,7 +25,7 @@
 - Desde el 2026-10-03, VPS de Clouding (Ubuntu 24.04, 4 vCPU, 8 GB de RAM, sin
   swap) en vez de Render. Docker Compose (`deploy/docker-compose.yml`, ver
   `deploy/README.md`): la API y Caddy delante (HTTPS de `api.pdfcadabra.com`,
-  cuerpo máx. 110 MB). No hay `.env`: todo va en el compose.
+  cuerpo máx. 26 MB). No hay `.env`: todo va en el compose.
 - Contenedor de la API: `mem_limit` 6 GiB, `/tmp` en tmpfs de 3 GiB (cuenta
   dentro de los 6), `pids_limit` 512, sin límite de CPU. `NODE_ENV=production`,
   `HEAVY_MAX_CONCURRENT=3`, `HEAVY_MAX_QUEUE=8`. Topes de tiempo, los del código:

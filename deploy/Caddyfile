@@ -8,10 +8,11 @@
 }
 
 api.pdfcadabra.com {
-	# Algo por encima de los 100 MB de multer, para que el 413 lo dé la API (en JSON y con
-	# cabeceras CORS) y no Caddy.
+	# Algo por encima de los 25 MB (20 del archivo + 5 de margen del multipart) que la API
+	# admite en el Content-Length, para que el 413 lo dé la API (en JSON y con cabeceras
+	# CORS) y no Caddy.
 	request_body {
-		max_size 110MB
+		max_size 26MB
 	}
 	header -Server
 	reverse_proxy api:3000

@@ -52,15 +52,16 @@ app.use(cors({
     exposedHeaders: ['X-Redact-Warnings', 'X-Redact-Text-Loss', 'X-Compress-Status', 'X-Compress-Level']
 }));
 
-// Health check de Render: responde al instante, antes de los parsers de body y de
-// multer, sin pasar por la cola pesada ni lanzar procesos hijos.
+// Health check: responde al instante, antes de multer, sin pasar por la cola pesada ni
+// lanzar procesos hijos.
 app.get('/health', (req, res) => {
     res.set('Cache-Control', 'no-store');
     res.json({ status: 'ok' });
 });
 
-app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+// Sin parsers globales de JSON ni de formularios: ninguna ruta los usa (los campos llegan
+// en el multipart, que lee multer) y con ellos cualquiera podía hacer que el proceso
+// leyera y parseara en memoria cuerpos de 100 MB enviados a cualquier ruta.
 
 // 2. Almacenamiento temporal EN DISCO (no en memoria), en una carpeta propia dentro de
 // /tmp: ahí escribe multer la subida y ahí van también los JSON intermedios y el PDF de

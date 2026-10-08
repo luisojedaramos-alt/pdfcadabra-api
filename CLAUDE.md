@@ -38,11 +38,15 @@
 
 - `GET /health` responde 200 `{"status":"ok"}` con `Cache-Control: no-store`.
   Es para el health check de Render (Settings → Health Check Path): va justo
-  después de `cors` y antes de los parsers de body, multer y la cola HEAVY_*,
+  después de `cors` y antes de multer y la cola HEAVY_*,
   así que no lanza gs/python ni espera en cola aunque haya trabajos pesados en
   curso. Solo dice que el proceso de Node está vivo; no comprueba que gs o
   python3 funcionen. Test en `server.test.js` (por eso `server.js` exporta
   `app` y solo llama a `listen` si se ejecuta directamente).
+- No hay `express.json` ni `express.urlencoded` (desde 2026-10-08): ninguna ruta
+  los usaba y leían en memoria cuerpos de hasta 100 MB en cualquier ruta (20 de
+  94 MB subían el contenedor +2,2 GB y bloqueaban el bucle). Test en
+  `body-parsers.test.js`.
 
 # Errores de subida
 

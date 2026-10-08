@@ -229,3 +229,14 @@
   cabeceras); el límite exacto del archivo lo aplica multer, también sin Content-Length.
   El cuerpo del 413 sigue siendo `{error: "FILE_TOO_LARGE", message}`. Caddy corta en
   25 MB (20 + 5). Test en `upload-limit.test.js`.
+- Límite por cliente (`iplimit.js`, `limitPerClient`, tras `checkUploadSize` y antes de
+  `admitUpload`): 3 peticiones a la vez por IP, contando la subida (`IP_MAX_CONCURRENT`), y
+  60 cada 10 min (`IP_MAX_PER_WINDOW`, `IP_WINDOW_MS`, ventana fija); si no, 429
+  `RATE_LIMITED` con `Retry-After` y sin leer el cuerpo. Cuentan también las que luego
+  rechaza la cola. La clave es un HMAC de la IP con una clave aleatoria de cada arranque,
+  en un `Map` que se purga al caducar la ventana: ninguna IP en memoria, disco ni log.
+  `trust proxy` = 1: comprobado el 2026-10-08 en el servidor de pruebas (Caddy 2.11.4 por
+  HTTP, misma config) que un `X-Forwarded-For` falsificado (una o varias entradas,
+  cabecera repetida, `X-Real-IP`, `Forwarded`) no cambia `req.ip`: Caddy lo sustituye por
+  la IP real. Solo se podría falsificar hablando directamente con el puerto 3000, que no se
+  publica. Si algún día la API se expone sin Caddy, revisar esto. Test en `iplimit.test.js`.

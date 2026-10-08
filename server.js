@@ -8,11 +8,16 @@ const crypto = require('crypto');
 const os = require('os');
 const uuidv4 = () => crypto.randomUUID();
 const { createLimiter } = require('./limiter');
+const { createIpLimiter } = require('./iplimit');
 const { startPeriodicSweep } = require('./cleanup');
 const { describeError, describeProcessError } = require('./errlog');
 
 const app = express();
 const port = process.env.PORT || 3000;
+// La API solo es accesible a través de Caddy (no publica puertos), que sustituye el
+// X-Forwarded-For que trae el cliente por su IP real (comprobado con Caddy 2.11.4,
+// 2026-10-08): req.ip es esa IP y un X-Forwarded-For falsificado no la cambia.
+app.set('trust proxy', 1);
 
 // 1. Configuración de middlewares
 // AÑADIDO: exposedHeaders para que React pueda leer nuestras alertas de censura
@@ -279,6 +284,31 @@ const admitUpload = (req, res, next) => {
     next();
 };
 
+// Límite por cliente (IP), antes de multer y de la cola: IP_MAX_CONCURRENT peticiones a la
+// vez (contando la subida) e IP_MAX_PER_WINDOW cada IP_WINDOW_MS; si no, 429 RATE_LIMITED
+// con Retry-After y sin leer el cuerpo. Así una sola IP no ocupa toda la cola (en las
+// pruebas de carga, 12 subidas de un mismo cliente dejaban sin servicio a los demás).
+// Ver iplimit.js: no se guarda ni se registra ninguna IP.
+const ipLimiter = createIpLimiter({
+    maxConcurrent: Math.max(1, envInt('IP_MAX_CONCURRENT', 3)),
+    maxPerWindow: Math.max(1, envInt('IP_MAX_PER_WINDOW', 60)),
+    windowMs: Math.max(1, envInt('IP_WINDOW_MS', 10 * 60 * 1000))
+});
+const RATE_ERRORS = {
+    CONCURRENT: 'Ya tienes varios documentos procesándose. Espera a que terminen y vuelve a intentarlo.',
+    RATE: 'Has hecho demasiadas solicitudes en poco tiempo. Inténtalo de nuevo en unos minutos.'
+};
+const limitPerClient = (req, res, next) => {
+    const slot = ipLimiter.acquire(req.ip);
+    if (!slot.ok) {
+        console.warn(`Límite por cliente (${slot.reason}): 429.`);
+        res.set({ 'Retry-After': String(slot.retryAfterS), Connection: 'close' });
+        return res.status(429).json({ code: 'RATE_LIMITED', error: RATE_ERRORS[slot.reason] });
+    }
+    res.once('close', slot.release);
+    next();
+};
+
 // Lanza el proceso hijo con timeout.
 // keepSlot=false: libera el hueco al terminar, tanto en éxito como en error o timeout.
 // keepSlot=true: el llamador conserva la responsabilidad del hueco hasta terminar toda
@@ -338,7 +368,7 @@ app.get('/v1/queue/status/:id', (req, res) => {
 // ==========================================
 // MÓDULO 1: CENSURA - BÚSQUEDA
 // ==========================================
-app.post('/v1/redact/search', checkUploadSize, admitUpload, uploadFile, heavyGate, (req, res) => {
+app.post('/v1/redact/search', checkUploadSize, limitPerClient, admitUpload, uploadFile, heavyGate, (req, res) => {
     if (!req.file || !req.body.patterns) {
         secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
         return res.status(400).json({ error: 'Falta el archivo o los patrones.' });
@@ -380,7 +410,7 @@ app.post('/v1/redact/search', checkUploadSize, admitUpload, uploadFile, heavyGat
 // ==========================================
 // MÓDULO 2: CENSURA - DESTRUCCIÓN Y APLICACIÓN
 // ==========================================
-app.post('/v1/redact/apply', checkUploadSize, admitUpload, uploadFile, heavyGate, (req, res) => {
+app.post('/v1/redact/apply', checkUploadSize, limitPerClient, admitUpload, uploadFile, heavyGate, (req, res) => {
     if (!req.file || !req.body.items) {
         secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
         return res.status(400).json({ error: 'Falta el archivo o los hallazgos.' });
@@ -538,7 +568,7 @@ const compressArgs = ({ pdfSettings, colorDpi, jpegQFactor }, inputPath, outputP
     ];
 };
 
-app.post('/v1/compress', checkUploadSize, admitUpload, uploadFile, heavyGate, (req, res) => {
+app.post('/v1/compress', checkUploadSize, limitPerClient, admitUpload, uploadFile, heavyGate, (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No se ha subido ningún archivo.' });
     }

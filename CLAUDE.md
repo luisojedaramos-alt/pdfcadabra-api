@@ -201,3 +201,15 @@
 
 - Trixie trae el paquete `jbig2` (jbig2enc), que bookworm no tenía, por si se
   añade compresión JBIG2 sin pérdida (nunca con pérdida: sin `-s`). No añadido.
+
+# Protección de la API (rama feat/proteccion-api, 2026-10-08)
+
+- Cliente desconectado sin respuesta (`res` 'close' sin `writableFinished`): `abortHeavy`
+  mata con SIGKILL los procesos hijos en marcha de la petición (gs, python), libera el hueco
+  y marca la petición: `runHeavy` ya no lanza el siguiente paso (jpeg_flate.py, la red de
+  seguridad, verify) ni llama a su callback. Los borrados de cada ruta (`cleanupOnClose`) se
+  repiten cuando muere el proceso: con SIGKILL, redact.py no borra sus copias de capas
+  (`<salida>.capas.pdf`, `.pre.pdf`, `.pre.pdf.capas.pdf`). Ningún script lanza
+  subprocesos, así que no quedan nietos huérfanos. Medido antes: gs seguía 16 s y
+  redact.py 52 s tras el corte, ocupando su hueco. Test en `disconnect.test.js`
+  (procesos reales que no terminan).

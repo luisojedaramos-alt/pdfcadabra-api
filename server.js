@@ -129,11 +129,12 @@ startPeriodicSweep(UPLOAD_DIR, SWEEP_MAX_AGE_MS, SWEEP_INTERVAL_MS);
 // Equivalente a un `finally` de toda la petición: 'close' se emite una sola vez, pase
 // lo que pase (envío completado, error, excepción o cliente desconectado). Un
 // try/finally síncrono no serviría: se ejecutaría antes de que res.sendFile terminase
-// y borraría el archivo mientras se envía. Si el cliente se va con el proceso hijo aún
-// en marcha, el archivo de salida se crea después: lo borra el callback de ese proceso
-// (y, en último caso, el barrido periódico).
-const cleanupOnClose = (res, files) => {
-    res.once('close', () => secureCleanup(files));
+// y borraría el archivo mientras se envía. Si el cliente se va con un proceso hijo en
+// marcha, heavyGate lo mata y `cleanup` se repite cuando ese proceso termina: con
+// SIGKILL no borra sus temporales y aún podía estar escribiendo al cerrarse la conexión.
+const cleanupOnClose = (req, res, cleanup) => {
+    res.once('close', cleanup);
+    (req.abortCleanups ||= []).push(cleanup);
 };
 
 // ==========================================
@@ -180,10 +181,11 @@ const heavyGate = async (req, res, next) => {
     const id = headerId && UUID_RE.test(headerId) && !heavyLimiter.has(headerId) ? headerId : uuidv4();
     req.heavyId = id;
 
-    // El hueco lo libera el callback del proceso hijo (runHeavy), NO el cierre de
-    // la conexión: si el cliente se va con gs aún corriendo, la RAM sigue en uso.
-    // Aquí solo se cubren las rutas que responden sin llegar a lanzar el proceso.
+    // Con respuesta, el hueco lo libera el callback del proceso hijo (runHeavy) o la ruta;
+    // aquí solo se cubren las rutas que responden sin llegar a lanzar el proceso. Sin
+    // respuesta (cliente desconectado), abortHeavy mata los procesos y libera el hueco.
     res.on('close', () => {
+        if (!res.writableFinished) abortHeavy(req);
         if (!req.execStarted && req.releaseSlot) req.releaseSlot();
         // Cliente desconectado mientras esperaba en cola: fuera de la cola y borrar su subida.
         if (!res.writableFinished && heavyLimiter.cancel(id)) secureCleanup([req.file.path]);
@@ -204,17 +206,42 @@ const heavyGate = async (req, res, next) => {
     next();
 };
 
+// Borrados registrados con cleanupOnClose (idempotentes).
+const runAbortCleanups = (req) => (req.abortCleanups || []).forEach((cleanup) => cleanup());
+
+// Cliente desconectado sin respuesta: mata los procesos hijos en marcha de la petición
+// (gs, python), libera su hueco y marca la petición para que no se lance el siguiente paso
+// de la cadena (jpeg_flate.py tras gs, la red de seguridad, verify). Sin esto, gs o
+// redact.py seguían hasta su tope (180 s en Anonimizar) ocupando un hueco para nadie.
+const abortHeavy = (req) => {
+    if (req.heavyAborted) return;
+    req.heavyAborted = true;
+    const children = [...(req.heavyChildren || [])];
+    for (const child of children) child.kill('SIGKILL');
+    if (req.releaseSlot) req.releaseSlot();
+    if (children.length > 0) console.warn(`Cliente desconectado: ${children.length} proceso(s) terminado(s).`);
+};
+
 // Lanza el proceso hijo con timeout.
 // keepSlot=false: libera el hueco al terminar, tanto en éxito como en error o timeout.
 // keepSlot=true: el llamador conserva la responsabilidad del hueco hasta terminar toda
 // su cadena, también si un proceso devuelve error (release es idempotente).
+// Si el cliente ya se fue (abortHeavy), no lanza nada, y si se va con el proceso en
+// marcha, no llama a `callback`: la cadena se corta ahí y solo se repiten los borrados.
 const runHeavy = (req, command, args, callback, { keepSlot = false, timeoutMs = HEAVY_EXEC_TIMEOUT_MS, env } = {}) => {
+    if (req.heavyAborted) {
+        runAbortCleanups(req);
+        return null;
+    }
     const options = { timeout: timeoutMs, killSignal: 'SIGKILL' };
     if (env) options.env = env;
     const child = execFile(command, args, options, (error, stdout, stderr) => {
+        req.heavyChildren.delete(child);
+        if (req.heavyAborted) return runAbortCleanups(req); // hueco ya liberado por abortHeavy
         if (!keepSlot && req.releaseSlot) req.releaseSlot();
         callback(error, stdout, stderr);
     });
+    (req.heavyChildren ||= new Set()).add(child);
     req.execStarted = true; // tras execFile: si este lanzase una excepción, el 'close' aún libera el hueco
     return child;
 };
@@ -264,6 +291,7 @@ app.post('/v1/redact/search', upload.single('file'), heavyGate, (req, res) => {
     const baseId = uuidv4(); // Evita colisiones de archivos temporales entre usuarios
     const patternsPath = path.join(UPLOAD_DIR, `patterns_${baseId}.json`);
     const resultsPath = path.join(UPLOAD_DIR, `results_${baseId}.json`);
+    cleanupOnClose(req, res, () => secureCleanup([inputPath, patternsPath, resultsPath]));
 
     try {
         const patternsData = typeof req.body.patterns === 'string' ? req.body.patterns : JSON.stringify(req.body.patterns);
@@ -306,7 +334,9 @@ app.post('/v1/redact/apply', upload.single('file'), heavyGate, (req, res) => {
     const itemsPath = path.join(UPLOAD_DIR, `items_${baseId}.json`);
     const outputPath = path.join(UPLOAD_DIR, `censored_${baseId}.pdf`);
     const resultsPath = path.join(UPLOAD_DIR, `redact_results_${baseId}.json`); // NUEVO: Archivo de reporte
-    cleanupOnClose(res, [inputPath, itemsPath, outputPath, resultsPath]);
+    // Copias de trabajo de redact.py (capas OCG) que solo quedan si se le mata: él las borra al terminar.
+    const workCopies = [`${outputPath}.capas.pdf`, `${outputPath}.pre.pdf`, `${outputPath}.pre.pdf.capas.pdf`];
+    cleanupOnClose(req, res, () => secureCleanup([inputPath, itemsPath, outputPath, resultsPath, ...workCopies]));
 
     try {
         const itemsData = typeof req.body.items === 'string' ? req.body.items : JSON.stringify(req.body.items);
@@ -478,7 +508,7 @@ app.post('/v1/compress', upload.single('file'), heavyGate, (req, res) => {
         secureCleanup(tempFiles);
         removeTempDir(gsTmpDir);
     };
-    res.once('close', cleanupAll);
+    cleanupOnClose(req, res, cleanupAll);
     try {
         fs.mkdirSync(gsTmpDir);
     } catch (e) {

@@ -52,6 +52,30 @@ ssh pdfcadabra-clouding "cd /opt/pdfcadabra && rm -rf api.old && { [ ! -d api ] 
   && echo $REV > api/REVISION && docker compose -f api/deploy/docker-compose.yml up -d --build"
 ```
 
+Si la versión cambia el `Caddyfile`, hay que reiniciar Caddy tras la rotación. El archivo
+está montado desde `api/deploy/Caddyfile` y, después del `mv api api.old`, el contenedor
+sigue leyendo el antiguo (ahora en `api.old`). Por eso `caddy reload` dentro del contenedor
+no basta, y `up -d` no recrea Caddy porque su configuración de compose no cambia:
+
+```sh
+# Antes de desplegar, anotar el certificado que se sirve:
+echo | openssl s_client -connect api.pdfcadabra.com:443 -servername api.pdfcadabra.com 2>/dev/null \
+  | openssl x509 -noout -serial -enddate
+# Tras la rotación:
+ssh pdfcadabra-clouding 'docker run --rm -v /opt/pdfcadabra/api/deploy/Caddyfile:/etc/caddy/Caddyfile:ro \
+  caddy:2 caddy validate --config /etc/caddy/Caddyfile \
+  && docker compose -f /opt/pdfcadabra/api/deploy/docker-compose.yml restart caddy \
+  && docker exec pdfcadabra-caddy-1 cat /etc/caddy/Caddyfile'
+# Después, repetir el openssl de arriba: mismo serial (el certificado está en el volumen
+# caddy_data; reiniciar no pide uno nuevo).
+```
+
+Lección (2026-10-08): si se pasa un script al servidor por stdin (`ssh ... 'bash -s' < script`),
+`docker compose exec` (también con `-T`) y `docker exec -i` leen ese stdin y se comen el resto
+del script, que deja de ejecutarse sin dar error. Dentro de esos scripts, poner `< /dev/null`
+a cada `docker compose exec` / `docker exec -i`, o mandar el script de otra forma (p. ej.
+base64 en el argumento de ssh).
+
 Comprobar versiones dentro del contenedor (deben coincidir con Render: Node 24, gs 10.05.1,
 Python 3.13, PyMuPDF 1.28.2):
 

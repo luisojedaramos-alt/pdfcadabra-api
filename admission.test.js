@@ -40,7 +40,7 @@ function slowUpload(port, fileSize, sent) {
     const length = Buffer.byteLength(PART_HEAD) + fileSize + Buffer.byteLength(PART_TAIL);
     const req = http.request({
         port, host: '127.0.0.1', method: 'POST', path: '/v1/compress',
-        headers: { 'Content-Type': `multipart/form-data; boundary=${BOUNDARY}`, 'Content-Length': length }
+        headers: { 'Content-Type': `multipart/form-data; boundary=${BOUNDARY}`, 'Content-Length': length, Origin: 'https://pdfcadabra.com' }
     });
     const response = new Promise((resolve, reject) => {
         req.on('response', (res) => {

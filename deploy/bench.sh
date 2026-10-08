@@ -1,6 +1,6 @@
 #!/bin/bash
-# Mide /v1/compress con curl (sin cabecera Origin: el CORS solo acepta pdfcadabra.com, pero
-# las peticiones sin Origin pasan). Tiempos = total del curl, con subida y bajada.
+# Mide /v1/compress con curl. La API exige un Origin permitido en los POST: se envía
+# ORIGIN (por defecto https://pdfcadabra.com). Tiempos = total del curl, con subida y bajada.
 #
 #   bash deploy/bench.sh <url_base> <carpeta_con_pdfs> serie
 #       expediente-155p.pdf y escaneo-color-23p.pdf, en recommended, extreme y low (6, en serie)
@@ -11,6 +11,8 @@
 #   modo,archivo,nivel,http,x-compress-status,x-compress-level,bytes_salida,t_total_s
 # Los PDF de salida quedan en <carpeta>/out-<host>/ (borrarlos al terminar).
 set -u
+ORIGIN=${ORIGIN:-https://pdfcadabra.com}
+curl() { command curl -H "Origin: $ORIGIN" "$@"; }
 
 BASE=${1:?uso: bench.sh <url_base> <carpeta> serie|simultaneas [n] [nivel]}
 DIR=${2:?falta la carpeta de PDFs}

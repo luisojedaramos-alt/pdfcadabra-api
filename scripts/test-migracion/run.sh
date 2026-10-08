@@ -11,8 +11,11 @@
 #      salir vacío (los datos ya no están en el PDF).
 #   3. Solo en el temporal: peticiones que acaban mal (400 y cliente que corta a
 #      mitad), para comprobar después en el log que no quedan temporales.
-# Sin cabecera Origin: el CORS solo acepta pdfcadabra.com, pero deja pasar curl.
+# La API exige un Origin permitido en los POST: todas las peticiones llevan ORIGIN (por
+# defecto https://pdfcadabra.com).
 set -u
+ORIGIN=${ORIGIN:-https://pdfcadabra.com}
+curl() { command curl -H "Origin: $ORIGIN" "$@"; }
 
 TEMP=${1:?uso: run.sh <url_servicio_temporal> [url_produccion] [repeticiones]}
 PROD=${2:-https://pdfcadabra-api.onrender.com}

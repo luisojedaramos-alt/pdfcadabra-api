@@ -89,7 +89,7 @@ for (const outcome of ['éxito', 'error', 'timeout']) {
             form.append('file', new Blob([INPUT], { type: 'application/pdf' }), 'synthetic.pdf');
             form.append('level', 'recommended');
             const request = fetch(`${base}/v1/compress`, {
-                method: 'POST', body: form, headers: { 'X-Request-Id': id }, signal: t.signal
+                method: 'POST', body: form, headers: { 'X-Request-Id': id, Origin: 'https://pdfcadabra.com' }, signal: t.signal
             }).then(async res => ({ res, body: Buffer.from(await res.arrayBuffer()) }));
             requests.push(request);
             request.catch(() => {}); // el timeout del test puede abortar las peticiones

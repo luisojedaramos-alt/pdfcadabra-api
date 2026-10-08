@@ -67,7 +67,7 @@ test('POST /v1/compress con gs fallando: el log sigue esas reglas', async (t) =>
     await new Promise((r) => server.once('listening', r));
     const form = new FormData();
     form.append('file', new Blob([Buffer.alloc(100, 'a')], { type: 'application/pdf' }), 'expediente-secreto.pdf');
-    const res = await fetch(`http://127.0.0.1:${server.address().port}/v1/compress`, { method: 'POST', body: form });
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/v1/compress`, { method: 'POST', body: form, headers: { Origin: 'https://pdfcadabra.com' } });
     await res.arrayBuffer();
     console.error = original;
 

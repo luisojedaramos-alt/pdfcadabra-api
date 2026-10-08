@@ -46,7 +46,8 @@ function upload(port, ip) {
         headers: {
             'Content-Type': `multipart/form-data; boundary=${BOUNDARY}`,
             'Content-Length': Buffer.byteLength(HEAD + FILE + TAIL),
-            'X-Forwarded-For': ip
+            'X-Forwarded-For': ip,
+            Origin: 'https://pdfcadabra.com'
         }
     });
     const response = new Promise((resolve, reject) => {

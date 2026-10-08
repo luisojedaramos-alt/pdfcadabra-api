@@ -57,6 +57,18 @@ app.use(cors({
     exposedHeaders: ['X-Redact-Warnings', 'X-Redact-Text-Loss', 'X-Compress-Status', 'X-Compress-Level']
 }));
 
+// Origin obligatorio en los POST de /v1/*: sin un Origin permitido, 403 sin leer el
+// cuerpo. Antes cors solo omitía sus cabeceras y la petición se procesaba igual (el
+// navegador no podía leer la respuesta, pero curl sí). Solo frena el uso casual: un
+// cliente que no sea un navegador puede poner el Origin que quiera. Los GET (/health,
+// /v1/queue/status) y el preflight (OPTIONS, que responde cors) no lo exigen.
+const requireOrigin = (req, res, next) => {
+    if (ALLOWED_ORIGINS.includes(req.get('Origin'))) return next();
+    console.warn('POST sin Origin permitido: 403.');
+    res.set('Connection', 'close');
+    return res.status(403).json({ code: 'ORIGIN_NOT_ALLOWED', error: 'Origen no permitido.' });
+};
+
 // Health check: responde al instante, antes de multer, sin pasar por la cola pesada ni
 // lanzar procesos hijos.
 app.get('/health', (req, res) => {
@@ -368,7 +380,7 @@ app.get('/v1/queue/status/:id', (req, res) => {
 // ==========================================
 // MÓDULO 1: CENSURA - BÚSQUEDA
 // ==========================================
-app.post('/v1/redact/search', checkUploadSize, limitPerClient, admitUpload, uploadFile, heavyGate, (req, res) => {
+app.post('/v1/redact/search', requireOrigin, checkUploadSize, limitPerClient, admitUpload, uploadFile, heavyGate, (req, res) => {
     if (!req.file || !req.body.patterns) {
         secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
         return res.status(400).json({ error: 'Falta el archivo o los patrones.' });
@@ -410,7 +422,7 @@ app.post('/v1/redact/search', checkUploadSize, limitPerClient, admitUpload, uplo
 // ==========================================
 // MÓDULO 2: CENSURA - DESTRUCCIÓN Y APLICACIÓN
 // ==========================================
-app.post('/v1/redact/apply', checkUploadSize, limitPerClient, admitUpload, uploadFile, heavyGate, (req, res) => {
+app.post('/v1/redact/apply', requireOrigin, checkUploadSize, limitPerClient, admitUpload, uploadFile, heavyGate, (req, res) => {
     if (!req.file || !req.body.items) {
         secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
         return res.status(400).json({ error: 'Falta el archivo o los hallazgos.' });
@@ -568,7 +580,7 @@ const compressArgs = ({ pdfSettings, colorDpi, jpegQFactor }, inputPath, outputP
     ];
 };
 
-app.post('/v1/compress', checkUploadSize, limitPerClient, admitUpload, uploadFile, heavyGate, (req, res) => {
+app.post('/v1/compress', requireOrigin, checkUploadSize, limitPerClient, admitUpload, uploadFile, heavyGate, (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No se ha subido ningún archivo.' });
     }

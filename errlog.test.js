@@ -49,7 +49,7 @@ test('un JSON mal formado no deja el cuerpo en el log ni en la respuesta', async
     await new Promise((r) => server.once('listening', r));
     const res = await fetch(`http://127.0.0.1:${server.address().port}/v1/redact/search`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Origin: 'https://pdfcadabra.com' },
         body: `{"patterns": ${SECRET}`
     });
     const body = await res.text();

@@ -240,3 +240,11 @@
   cabecera repetida, `X-Real-IP`, `Forwarded`) no cambia `req.ip`: Caddy lo sustituye por
   la IP real. Solo se podría falsificar hablando directamente con el puerto 3000, que no se
   publica. Si algún día la API se expone sin Caddy, revisar esto. Test en `iplimit.test.js`.
+- Origin obligatorio (`requireOrigin`, lo primero de las tres rutas POST): sin un Origin de
+  `ALLOWED_ORIGINS`, 403 `ORIGIN_NOT_ALLOWED` sin leer el cuerpo. Antes `cors` solo omitía
+  sus cabeceras y la petición se procesaba igual. Solo frena el uso casual (curl puede
+  poner cualquier Origin). `/health`, `/v1/queue/status` y el preflight no lo exigen.
+  `deploy/bench.sh` y `scripts/test-migracion/run.sh` envían `ORIGIN` (por defecto
+  https://pdfcadabra.com), y los tests de la API también. Test en `origin.test.js`.
+- Orden en cada ruta POST: `requireOrigin` (403) → `checkUploadSize` (413) →
+  `limitPerClient` (429) → `admitUpload` (503) → multer → `heavyGate` (cola).

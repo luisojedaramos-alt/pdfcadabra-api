@@ -36,6 +36,7 @@ async function apply(t) {
     form.append('items', JSON.stringify([{ id: 'a', page: 0, rect: [0, 0, 10, 10], text: 'x' }]));
     const res = await fetch(`http://127.0.0.1:${server.address().port}/v1/redact/apply`, {
         method: 'POST',
+        headers: { Origin: 'https://pdfcadabra.com' },
         body: form,
     });
     const body = Buffer.from(await res.arrayBuffer());

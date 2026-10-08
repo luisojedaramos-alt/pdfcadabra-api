@@ -81,7 +81,7 @@ async function post(t, route, sample, fields) {
     const bytes = fs.readFileSync(path.join(DIR, sample));
     form.append('file', new Blob([bytes], { type: 'application/pdf' }), sample);
     for (const [k, v] of Object.entries(fields)) form.append(k, v);
-    const res = await fetch(`http://127.0.0.1:${server.address().port}${route}`, { method: 'POST', body: form });
+    const res = await fetch(`http://127.0.0.1:${server.address().port}${route}`, { method: 'POST', body: form, headers: { Origin: 'https://pdfcadabra.com' } });
     return { res, body: Buffer.from(await res.arrayBuffer()), input: bytes };
 }
 

@@ -40,7 +40,7 @@ const TAIL = Buffer.from(`\r\n--${BOUNDARY}--\r\n`);
 // headersOnly: anuncia el cuerpo pero no envía nada.
 function post(port, size, { chunked = false, headersOnly = false, contentLength } = {}) {
     return new Promise((resolve, reject) => {
-        const headers = { 'Content-Type': `multipart/form-data; boundary=${BOUNDARY}` };
+        const headers = { 'Content-Type': `multipart/form-data; boundary=${BOUNDARY}`, Origin: 'https://pdfcadabra.com' };
         if (!chunked) headers['Content-Length'] = contentLength ?? HEAD.length + size + TAIL.length;
         const req = http.request({ port, host: '127.0.0.1', method: 'POST', path: '/v1/compress', headers });
         req.on('response', (res) => {

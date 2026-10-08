@@ -58,7 +58,7 @@ async function compress(t) {
     // Más grande que la salida simulada, para que cuente como comprimido.
     form.append('file', new Blob([Buffer.alloc(10000, 'a')], { type: 'application/pdf' }), 'in.pdf');
     form.append('level', 'extreme');
-    const res = await fetch(`http://127.0.0.1:${server.address().port}/v1/compress`, { method: 'POST', body: form });
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/v1/compress`, { method: 'POST', body: form, headers: { Origin: 'https://pdfcadabra.com' } });
     return { res, body: Buffer.from(await res.arrayBuffer()) };
 }
 

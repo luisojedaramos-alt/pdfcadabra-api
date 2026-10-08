@@ -94,7 +94,7 @@ for (const [route, { stage, fields }] of Object.entries(ROUTES)) {
         form.append('file', new Blob([Buffer.from('%PDF-1.4 entrada')], { type: 'application/pdf' }), 'in.pdf');
         for (const [k, v] of Object.entries(fields)) form.append(k, v);
         const request = fetch(`${base}${route}`, {
-            method: 'POST', body: form, headers: { 'X-Request-Id': id }, signal: controller.signal
+            method: 'POST', body: form, headers: { 'X-Request-Id': id, Origin: 'https://pdfcadabra.com' }, signal: controller.signal
         });
         request.catch(() => {});
 
@@ -128,7 +128,7 @@ for (const [route, { stage, fields }] of Object.entries(ROUTES)) {
         const form2 = new FormData();
         form2.append('file', new Blob([Buffer.from('%PDF-1.4 otra')], { type: 'application/pdf' }), 'in.pdf');
         for (const [k, v] of Object.entries(fields)) form2.append(k, v);
-        fetch(`${base}${route}`, { method: 'POST', body: form2, signal: controller2.signal }).catch(() => {});
+        fetch(`${base}${route}`, { method: 'POST', body: form2, headers: { Origin: 'https://pdfcadabra.com' }, signal: controller2.signal }).catch(() => {});
         const second = await next;
         controller2.abort();
         await waitFor(() => second.child.exitCode !== null || second.child.signalCode !== null, 'que muera el segundo');

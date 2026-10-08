@@ -63,7 +63,7 @@ async function compress(t, level) {
     const form = new FormData();
     form.append('file', new Blob([INPUT], { type: 'application/pdf' }), 'in.pdf');
     form.append('level', level);
-    const res = await fetch(`http://127.0.0.1:${server.address().port}/v1/compress`, { method: 'POST', body: form });
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/v1/compress`, { method: 'POST', body: form, headers: { Origin: 'https://pdfcadabra.com' } });
     const body = Buffer.from(await res.arrayBuffer());
     await new Promise((r) => setTimeout(r, 150)); // el borrado es asíncrono
     return { res, body };

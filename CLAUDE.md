@@ -54,7 +54,8 @@
   `LIMIT_FILE_SIZE` → 413 `FILE_TOO_LARGE`; cualquier otro código → 400
   `UPLOAD_ERROR` con mensaje genérico. Las cabeceras CORS llegan porque `cors`
   corre antes que las rutas, y multer borra el parcial de `pdfcadabra-uploads`
-  él mismo antes de llamar al handler (verificado en local con 101 MB).
+  él mismo antes de llamar al handler (verificado en local con 101 MB; hoy el
+  límite es de 20 MB, ver Protección de la API).
 
 # Anonimizar (redact.py)
 
@@ -220,3 +221,11 @@
   deja de contar al entrar en heavyGate (pasa a contar en el limiter) o al cerrarse.
   Medido antes: cada 503 llegaba tras recibir el archivo entero, y unas 35 subidas de
   90 MB llenaban el tmpfs (ENOSPC, 500 genérico). Test en `admission.test.js`.
+- Límite de subida de 20 MB (`MAX_UPLOAD_BYTES`; antes 100 MB): `uploadLimitFor(req)` lo
+  devuelve para cada petición y es donde entraría un límite mayor de pago (no
+  implementado). `checkUploadSize`, lo primero de cada ruta POST, responde 413
+  `FILE_TOO_LARGE` sin leer el cuerpo si el Content-Length pasa del límite más 5 MB de
+  margen del multipart (4 campos de 1 MB como mucho, `MAX_FIELDS`/`MAX_FIELD_BYTES`, más
+  cabeceras); el límite exacto del archivo lo aplica multer, también sin Content-Length.
+  El cuerpo del 413 sigue siendo `{error: "FILE_TOO_LARGE", message}`. Caddy corta en
+  25 MB (20 + 5). Test en `upload-limit.test.js`.

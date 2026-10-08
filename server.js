@@ -14,7 +14,7 @@ const { describeError, describeProcessError } = require('./errlog');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// 1. Configuración de middlewares y límites de carga pesada (100 MB para LexNET)
+// 1. Configuración de middlewares
 // AÑADIDO: exposedHeaders para que React pueda leer nuestras alertas de censura
 // Orígenes permitidos: solo el dominio de producción (+ localhost si NODE_ENV no es 'production'),
 // más los de EXTRA_ALLOWED_ORIGINS (separados por comas, p. ej. el branch deploy de dev para la
@@ -61,17 +61,49 @@ app.get('/health', (req, res) => {
 
 // Sin parsers globales de JSON ni de formularios: ninguna ruta los usa (los campos llegan
 // en el multipart, que lee multer) y con ellos cualquiera podía hacer que el proceso
-// leyera y parseara en memoria cuerpos de 100 MB enviados a cualquier ruta.
+// leyera y parseara en memoria cuerpos de hasta 100 MB enviados a cualquier ruta.
 
 // 2. Almacenamiento temporal EN DISCO (no en memoria), en una carpeta propia dentro de
 // /tmp: ahí escribe multer la subida y ahí van también los JSON intermedios y el PDF de
 // salida. Tener carpeta propia permite barrerla sin tocar el resto de /tmp.
 const UPLOAD_DIR = path.join(os.tmpdir(), 'pdfcadabra-uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-const upload = multer({
-    dest: UPLOAD_DIR,
-    limits: { fileSize: 100 * 1024 * 1024 } // Límite estricto de 100 MB
+
+// Tamaño máximo del PDF subido. uploadLimitFor es el punto donde entraría un límite
+// mayor para usuarios de pago; hoy es el mismo para todos.
+const MB = 1024 * 1024;
+const MAX_UPLOAD_BYTES = 20 * MB;
+const uploadLimitFor = (req) => MAX_UPLOAD_BYTES;
+// Campos de texto del multipart (level, patterns, items): como mucho MAX_FIELDS de
+// MAX_FIELD_BYTES (1 MB, el valor por defecto de multer). Con eso, el cuerpo entero nunca
+// pasa de límite del archivo + MULTIPART_MARGIN_BYTES (Caddy corta en 25 MB = 20 + 5).
+const MAX_FIELDS = 4;
+const MAX_FIELD_BYTES = 1 * MB;
+const MULTIPART_MARGIN_BYTES = MAX_FIELDS * MAX_FIELD_BYTES + 1 * MB;
+
+const sendTooLarge = (res, limit) => res.status(413).json({
+    error: 'FILE_TOO_LARGE', message: `El archivo supera el máximo de ${Math.round(limit / MB)} MB.`
 });
+
+// Va antes de todo lo demás de la ruta: si el Content-Length ya anuncia más de lo que cabe,
+// 413 sin leer el cuerpo (Connection: close). Sin Content-Length (chunked), el límite lo
+// aplica multer al llegar al byte de más.
+const checkUploadSize = (req, res, next) => {
+    req.uploadLimit = uploadLimitFor(req);
+    const length = Number(req.get('Content-Length'));
+    if (Number.isFinite(length) && length > req.uploadLimit + MULTIPART_MARGIN_BYTES) {
+        console.warn('Subida rechazada por Content-Length (FILE_TOO_LARGE)');
+        res.set('Connection', 'close');
+        return sendTooLarge(res, req.uploadLimit);
+    }
+    next();
+};
+
+// multer con el límite de esta petición (se crea por petición: el límite puede variar).
+const uploadFile = (req, res, next) => multer({
+    dest: UPLOAD_DIR,
+    limits: { fileSize: req.uploadLimit, files: 1, fields: MAX_FIELDS, fieldSize: MAX_FIELD_BYTES }
+}).single('file')(req, res, next);
 
 // ==========================================
 // BORRADO DE ARCHIVOS TEMPORALES
@@ -306,7 +338,7 @@ app.get('/v1/queue/status/:id', (req, res) => {
 // ==========================================
 // MÓDULO 1: CENSURA - BÚSQUEDA
 // ==========================================
-app.post('/v1/redact/search', admitUpload, upload.single('file'), heavyGate, (req, res) => {
+app.post('/v1/redact/search', checkUploadSize, admitUpload, uploadFile, heavyGate, (req, res) => {
     if (!req.file || !req.body.patterns) {
         secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
         return res.status(400).json({ error: 'Falta el archivo o los patrones.' });
@@ -348,7 +380,7 @@ app.post('/v1/redact/search', admitUpload, upload.single('file'), heavyGate, (re
 // ==========================================
 // MÓDULO 2: CENSURA - DESTRUCCIÓN Y APLICACIÓN
 // ==========================================
-app.post('/v1/redact/apply', admitUpload, upload.single('file'), heavyGate, (req, res) => {
+app.post('/v1/redact/apply', checkUploadSize, admitUpload, uploadFile, heavyGate, (req, res) => {
     if (!req.file || !req.body.items) {
         secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
         return res.status(400).json({ error: 'Falta el archivo o los hallazgos.' });
@@ -506,7 +538,7 @@ const compressArgs = ({ pdfSettings, colorDpi, jpegQFactor }, inputPath, outputP
     ];
 };
 
-app.post('/v1/compress', admitUpload, upload.single('file'), heavyGate, (req, res) => {
+app.post('/v1/compress', checkUploadSize, admitUpload, uploadFile, heavyGate, (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No se ha subido ningún archivo.' });
     }
@@ -708,7 +740,7 @@ app.use((err, req, res, next) => {
     if (err instanceof multer.MulterError) {
         console.warn(`Subida rechazada (${err.code}${err.field ? `, campo "${err.field}"` : ''})`);
         if (err.code === 'LIMIT_FILE_SIZE') {
-            return res.status(413).json({ error: 'FILE_TOO_LARGE', message: 'El archivo supera el máximo de 100 MB.' });
+            return sendTooLarge(res, req.uploadLimit);
         }
         return res.status(400).json({ error: 'UPLOAD_ERROR', message: 'No se ha podido procesar el archivo subido.' });
     }

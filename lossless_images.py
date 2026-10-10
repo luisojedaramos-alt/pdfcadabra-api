@@ -10,7 +10,10 @@ Se protegen (sin pérdida y sin reducir, sea cual sea el nivel):
 - las de 1 bit (DeviceGray, ICCBased, Indexed de 2 colores, ImageMask...);
 - las Indexed de hasta 16 colores;
 - las de 8 bits sin JPEG (Flate, LZW, sin filtro...) que usan hasta 16 colores: un PNG con
-  paleta o un QR en gris insertado por otra herramienta suele acabar así en el PDF.
+  paleta o un QR en gris insertado por otra herramienta suele acabar así en el PDF. También
+  las Indexed con una paleta mayor (hival de 16 o más) que de verdad usan hasta 16 colores:
+  sellos, logos o gráficos guardados con una paleta de 256 entradas, a veces con el QR
+  dentro, que Ghostscript reducía (en extrema, un QR de módulos de 2 px dejaba de leerse).
 
 Cómo: `protect` sustituye cada una por una máscara diminuta (ImageMask de 64x2) que lleva
 su número de objeto, Ghostscript la copia sin tocarla (sin pérdida, sin reducir: la salida
@@ -82,8 +85,9 @@ def is_protected(doc, xref):
     if _key(doc, xref, "BitsPerComponent")[1] == "1":
         return True
     hival = _indexed_hival(doc, xref)
-    if hival is not None:
-        return hival < MAX_COLORS
+    if hival is not None and hival < MAX_COLORS:
+        return True
+    # Indexed con paleta grande: cuentan los colores que usa, como en las de 8 bits.
     filters = _key(doc, xref, "Filter")[1]
     if any(f in filters for f in LOSSY_FILTERS):
         return False

@@ -91,6 +91,27 @@ def photo_jpeg(w, h, seed=1):
     return pix.tobytes("jpg", jpg_quality=90)
 
 
+STAMP_COLORS = {bytes.fromhex("ffffff"), bytes.fromhex("000000"), bytes.fromhex("c01020")}
+
+
+def stamp256(bits, pad=30, frame=8):
+    """(ancho, alto, diccionario, datos) de una Indexed de 8 bits y hival 255 que solo usa los
+    tres primeros colores de la paleta (STAMP_COLORS): marco rojo y el código en el centro."""
+    palette = bytearray.fromhex("ffffff 000000 c01020")
+    for i in range(3, 256):  # entradas sin usar, todas distintas
+        palette += bytes(((i * 37) % 256, (i * 91) % 256, (i * 53) % 256))
+    qw, qh = len(bits[0]), len(bits)
+    w, h = qw + 2 * pad, qh + 2 * pad
+    idx = bytearray(w * h)
+    for y in range(h):
+        for x in range(w):
+            if min(x, y, w - 1 - x, h - 1 - y) < frame:
+                idx[y * w + x] = 2
+            elif pad <= x < pad + qw and pad <= y < pad + qh and not bits[y - pad][x - pad]:
+                idx[y * w + x] = 1
+    return w, h, f"/BitsPerComponent 8 /ColorSpace [/Indexed /DeviceRGB 255 <{bytes(palette).hex()}>]", bytes(idx)
+
+
 def make_codes_pdf(path):
     """Una imagen por página, colocada a 300 ppp. Devuelve [(nombre, xref)] en orden de página.
 
@@ -130,6 +151,9 @@ def make_codes_pdf(path):
     idx = [((x - 150) ** 2 + (y - 150) ** 2) // 300 % 16 for y in range(sh) for x in range(sw)]
     add("stamp", sw, sh, f"/BitsPerComponent 4 /ColorSpace [/Indexed /DeviceRGB 15 <{palette}>]",
         bytes((idx[i] << 4) | idx[i + 1] for i in range(0, len(idx), 2)))
+    # Sello con paleta de 256 entradas (hival 255) que solo usa 3: blanco, negro y el rojo del
+    # marco, con un QR de módulos de 2 px dentro. Antes se reducía y en extrema no se leía.
+    add("qr-stamp256", *stamp256(code_bits("qr", 2)))
     add("photo", 1200, 800, "/BitsPerComponent 8 /ColorSpace /DeviceRGB", photo_jpeg(1200, 800),
         compress=False, filt="/DCTDecode")
 
@@ -208,6 +232,19 @@ class Clasificacion(unittest.TestCase):
         doc.update_stream(pal, bytes(range(256)))
         self.assertFalse(li.is_protected(doc, gray))
         self.assertFalse(li.is_protected(doc, pal))
+
+    def test_indexed_de_paleta_grande_segun_los_colores_que_usa(self):
+        doc = pymupdf.open()
+        w, h, dict_, data = stamp256(code_bits("qr", 2))
+        stamp = doc.get_new_xref()
+        doc.update_object(stamp, f"<< /Type /XObject /Subtype /Image /Width {w} /Height {h} {dict_} >>")
+        doc.update_stream(stamp, data)
+        self.assertTrue(li.is_protected(doc, stamp))
+        # La misma paleta usando 17 colores: ya no.
+        many = doc.get_new_xref()
+        doc.update_object(many, f"<< /Type /XObject /Subtype /Image /Width {w} /Height {h} {dict_} >>")
+        doc.update_stream(many, bytes(i % 17 for i in range(w * h)))
+        self.assertFalse(li.is_protected(doc, many))
 
     def test_las_smask_no_se_sustituyen(self):
         doc = pymupdf.open()
@@ -289,6 +326,18 @@ class ComprimirConGhostscript(unittest.TestCase):
                     self.assertNotIn("DCT", out.xref_get_key(xref, "Filter")[1])
                     self.assertNotIn("JPX", out.xref_get_key(xref, "Filter")[1])
                     self.assertEqual(image_pixels(out, page_no), image_pixels(orig, page_no))
+
+    def test_sello_de_paleta_grande_sin_reducir_y_con_los_mismos_colores(self):
+        page_no = [n for n, _ in self.names].index("qr-stamp256")
+        size = pymupdf.open(self.src)[page_no].get_images(full=True)[0][2:4]
+        for level, path in self.out.items():
+            with self.subTest(level=level):
+                out = pymupdf.open(path)
+                im = out[page_no].get_images(full=True)[0]
+                self.assertEqual(im[2:4], size)
+                self.assertEqual(li._indexed_hival(out, im[0]), 255)
+                _, _, samples = image_pixels(out, page_no)
+                self.assertEqual({samples[i:i + 3] for i in range(0, len(samples), 3)}, STAMP_COLORS)
 
     def test_la_foto_si_se_comprime(self):
         page_no = [n for n, _ in self.names].index("photo")

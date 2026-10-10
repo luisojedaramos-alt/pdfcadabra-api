@@ -162,8 +162,9 @@
 
 - Regla: las imágenes de 1 bit (DeviceGray, ICCBased, Indexed de 2 colores, ImageMask, JBIG2...),
   las Indexed de hasta 16 colores y las de 8 bits sin JPEG con hasta 16 colores (QR o sello
-  insertados desde PNG) salen SIN PÉRDIDA y SIN REDUCIR en todos los niveles. Suelen ser el
-  código de barras o el QR del CSV, que debe seguir siendo escaneable. Ghostscript no lo
+  insertados desde PNG; también las Indexed con hival de 16 o más que solo usan hasta 16, desde
+  2026-10-10: antes se reducían y en extrema un QR de módulos de 2 px dejaba de leerse) salen
+  SIN PÉRDIDA y SIN REDUCIR en todos los niveles. Suelen ser el código de barras o el QR del CSV, que debe seguir siendo escaneable. Ghostscript no lo
   respeta por sí solo: pasaba una barra de 1 bit en ICCBased a JPEG RGB a la mitad de ppp.
 - Cómo: `lossless_images.py protect` sustituye cada una por un marcador (ImageMask de 64x2 con
   su número de objeto) antes de gs; `jpeg_flate.py --originals <subida>` pone después la

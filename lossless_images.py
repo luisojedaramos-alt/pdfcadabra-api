@@ -11,7 +11,7 @@ Se protegen (sin pérdida y sin reducir, sea cual sea el nivel):
 - las Indexed de hasta 16 colores;
 - las de 8 bits sin JPEG (Flate, LZW, sin filtro...) que usan hasta 16 colores: un PNG con
   paleta o un QR en gris insertado por otra herramienta suele acabar así en el PDF. También
-  las Indexed con una paleta mayor (hival de 16 o más) que de verdad usan hasta 16 colores:
+  las Indexed con una paleta mayor (hival de 16 o más) que de verdad usan hasta 16 índices:
   sellos, logos o gráficos guardados con una paleta de 256 entradas, a veces con el QR
   dentro, que Ghostscript reducía (en extrema, un QR de módulos de 2 px dejaba de leerse).
 
@@ -79,6 +79,26 @@ def _indexed_hival(doc, xref):
     return int(m.group(1)) if m else None
 
 
+def _few_indices(doc, xref):
+    """Indexed de 8 bits con paleta grande: ¿usa hasta MAX_COLORS índices? Cada índice es un
+    color como mucho. Busca cada valor en los datos decodificados y para en cuanto pasa de
+    MAX_COLORS: una foto con paleta sale enseguida, sin decodificar la imagen a RGB (con
+    Pixmap y color_count, Comprimir tardaba un 20-27 % más en un PDF de dos imágenes así)."""
+    try:
+        data = doc.xref_stream(xref)
+    except Exception:
+        return False
+    if not data:
+        return False
+    used = 0
+    for i in range(256):
+        if bytes((i,)) in data:
+            used += 1
+            if used > MAX_COLORS:
+                return False
+    return True
+
+
 def is_protected(doc, xref):
     if _key(doc, xref, "ImageMask")[1] == "true":
         return True
@@ -87,7 +107,8 @@ def is_protected(doc, xref):
     hival = _indexed_hival(doc, xref)
     if hival is not None and hival < MAX_COLORS:
         return True
-    # Indexed con paleta grande: cuentan los colores que usa, como en las de 8 bits.
+    if hival is not None and _key(doc, xref, "BitsPerComponent")[1] == "8":
+        return _few_indices(doc, xref)
     filters = _key(doc, xref, "Filter")[1]
     if any(f in filters for f in LOSSY_FILTERS):
         return False

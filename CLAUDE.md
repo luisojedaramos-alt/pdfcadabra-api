@@ -252,5 +252,9 @@
   poner cualquier Origin). `/health`, `/v1/queue/status` y el preflight no lo exigen.
   `deploy/bench.sh` y `scripts/test-migracion/run.sh` envían `ORIGIN` (por defecto
   https://pdfcadabra.com), y los tests de la API también. Test en `origin.test.js`.
+- `Retry-After` va en `exposedHeaders` de CORS (desde 2026-10-10), para que el frontend lo
+  lea: 10 s en el 503 `QUEUE_FULL`/`QUEUE_TIMEOUT` y en el 429 por simultáneas, y lo que
+  queda de la ventana (redondeado arriba, mínimo 1) en el 429 por ventana agotada. Test en
+  `retry-after.test.js`.
 - Orden en cada ruta POST: `requireOrigin` (403) → `checkUploadSize` (413) →
   `limitPerClient` (429) → `admitUpload` (503) → multer → `heavyGate` (cola).

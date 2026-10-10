@@ -20,7 +20,8 @@ const port = process.env.PORT || 3000;
 app.set('trust proxy', 1);
 
 // 1. Configuración de middlewares
-// AÑADIDO: exposedHeaders para que React pueda leer nuestras alertas de censura
+// AÑADIDO: exposedHeaders para que React pueda leer nuestras alertas de censura y el
+// Retry-After de los 429 (RATE_LIMITED) y 503 (QUEUE_FULL, QUEUE_TIMEOUT)
 // Orígenes permitidos: solo el dominio de producción (+ localhost si NODE_ENV no es 'production'),
 // más los de EXTRA_ALLOWED_ORIGINS (separados por comas, p. ej. el branch deploy de dev para la
 // QA). Solo se aceptan orígenes https exactos (sin ruta, comodines ni barra final); el resto se
@@ -54,7 +55,7 @@ app.use(cors({
             callback(null, false);
         }
     },
-    exposedHeaders: ['X-Redact-Warnings', 'X-Redact-Text-Loss', 'X-Compress-Status', 'X-Compress-Level']
+    exposedHeaders: ['X-Redact-Warnings', 'X-Redact-Text-Loss', 'X-Compress-Status', 'X-Compress-Level', 'Retry-After']
 }));
 
 // Origin obligatorio en los POST de /v1/*: sin un Origin permitido, 403 sin leer el

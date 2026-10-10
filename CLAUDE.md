@@ -32,8 +32,8 @@
   cola 90 s, Comprimir 90 s en total (+30 s de verificación), Anonimizar 180 s
   por proceso. Health check de Docker a `/health` cada 30 s.
 - Comprobado en el servidor el 2026-10-08 (`docker inspect` del contenedor,
-  revisión 5ba1c90). Revisión actual en producción: 6c357e8 (desplegada el
-  2026-10-09).
+  revisión 5ba1c90). Revisión actual en producción: f25e361 (desplegada el
+  2026-10-10).
 
 # Health check
 

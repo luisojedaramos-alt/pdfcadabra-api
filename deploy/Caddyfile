@@ -8,14 +8,15 @@
 }
 
 api.pdfcadabra.com {
-	# Algo por encima de los 105 MB (100 del archivo en el plan Pro + 5 de margen del
-	# multipart) que la API admite en el Content-Length, para que el 413 lo dé la API (en
-	# JSON y con cabeceras CORS) y no Caddy. El plan gratuito (50 MB) lo corta la API: por
-	# Content-Length sin leer el cuerpo y, sin él, multer al pasar del límite.
+	# Algo por encima de los 133 MB (100 del archivo en el plan Pro + 33 de margen del
+	# multipart en /v1/redact/apply: la lista de hallazgos, hasta 16 MB) que la API admite
+	# en el Content-Length, para que el 413 lo dé la API (en JSON y con cabeceras CORS) y no
+	# Caddy. El plan gratuito (50 MB) lo corta la API: por Content-Length sin leer el cuerpo
+	# y, sin él, multer al pasar del límite.
 	# Sin timeouts de lectura del cuerpo ni de respuesta (los de Caddy por defecto: ninguno;
 	# solo 1 min para las cabeceras): los topes de tiempo son los de la API.
 	request_body {
-		max_size 106MB
+		max_size 134MB
 	}
 	header -Server
 	reverse_proxy api:3000

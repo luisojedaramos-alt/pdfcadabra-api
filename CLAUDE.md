@@ -236,8 +236,21 @@
   margen del multipart (4 campos de 1 MB como mucho, `MAX_FIELDS`/`MAX_FIELD_BYTES`, más
   cabeceras); el límite exacto del archivo lo aplica multer, también sin Content-Length.
   El cuerpo del 413 sigue siendo `{error: "FILE_TOO_LARGE", message}`. Caddy corta en
-  106 MB (100 + 5 del plan Pro, para no tener que tocarlo al activarlo): el 413 del plan
-  gratuito lo da siempre la API. Test en `upload-limit.test.js`.
+  134 MB (100 del plan Pro + 33 de margen de `/v1/redact/apply`, para no tener que tocarlo
+  al activar Pro): el 413 del plan gratuito lo da siempre la API. Test en
+  `upload-limit.test.js`.
+- Lista de hallazgos (`items`) de `/v1/redact/apply` (desde 2026-10-14): campo de texto de
+  hasta 16 MB (`ITEMS_MAX_BYTES`; antes 1 MB, como el resto). Con 50 MB salen decenas de
+  miles: 16.822 en un vectorial de 30 MB, unos 330 bytes cada uno tal como los da search
+  (5,5 MB), y 16 MB son unos 50.000. Por encima, 413 `{error: "ITEMS_TOO_LARGE", message}`
+  sin dejar archivos. Solo esa ruta: `APPLY_FIELDS` (2 campos de 16 MB + 1 byte: busboy da
+  el campo por truncado al llegar a `fieldSize`), y su margen en `checkUploadSize` es
+  2 × 16 MB + 1 MB = 33 MB; las demás siguen con `FIELDS` (4 de 1 MB, margen 5 MB).
+  Decisión: campo de texto y no parte de archivo. busboy aplica el tope mientras lee, y
+  con un archivo el `fileSize` de multer es uno para todas las partes (una lista de 50 MB
+  llegaría a /tmp antes de poder rechazarla). Cuesta memoria: como mucho 16 MB por
+  petición, 176 MB con las 11 admitidas a la vez. Test en `redact-items.test.js`
+  (20.000 hallazgos).
 - Límite por cliente (`iplimit.js`, `limitPerClient`, tras `checkUploadSize` y antes de
   `admitUpload`): 3 peticiones a la vez por IP, contando la subida (`IP_MAX_CONCURRENT`), y
   60 cada 10 min (`IP_MAX_PER_WINDOW`, `IP_WINDOW_MS`, ventana fija); si no, 429

@@ -118,13 +118,20 @@ const PLAN_LIMITS = {
 };
 app.locals.planFor = (req) => 'free';
 const limitsFor = (req) => (req.planLimits ||= PLAN_LIMITS[app.locals.planFor(req) === 'pro' ? 'pro' : 'free']);
-// Campos de texto del multipart (level, patterns, items): como mucho MAX_FIELDS de
-// MAX_FIELD_BYTES (1 MB, el valor por defecto de multer). Con eso, el cuerpo entero nunca
-// pasa de límite del archivo + MULTIPART_MARGIN_BYTES (Caddy corta en 106 MB, por encima
-// de 100 + 5 del plan Pro: el 413 lo da siempre la API).
-const MAX_FIELDS = 4;
-const MAX_FIELD_BYTES = 1 * MB;
-const MULTIPART_MARGIN_BYTES = MAX_FIELDS * MAX_FIELD_BYTES + 1 * MB;
+// Campos de texto del multipart de cada ruta: como mucho `fields` de `fieldSize` bytes cada
+// uno. busboy aplica fieldSize mientras lee (no guarda más). Con eso, el cuerpo entero nunca
+// pasa de límite del archivo + marginBytes(campos).
+//   FIELDS: level y patterns (1 MB, el valor por defecto de multer).
+//   APPLY_FIELDS (/v1/redact/apply): items, la lista de hallazgos que censurar. Con 50 MB
+//     salen decenas de miles (unos 330 bytes cada uno tal como los devuelve search: 16 MB
+//     son unos 50.000). Solo `items` hace falta, más uno de holgura.
+// Caddy corta en 134 MB, por encima de 100 + 33 de Anonimizar en el plan Pro: el 413 lo da
+// siempre la API.
+const FIELDS = { fields: 4, fieldSize: 1 * MB };
+const ITEMS_MAX_BYTES = 16 * MB;
+// +1: busboy da el campo por truncado al llegar a fieldSize, no al pasarlo.
+const APPLY_FIELDS = { fields: 2, fieldSize: ITEMS_MAX_BYTES + 1 };
+const marginBytes = ({ fields, fieldSize }) => fields * fieldSize + 1 * MB;
 
 const sendTooLarge = (res, limit) => res.status(413).json({
     error: 'FILE_TOO_LARGE', message: `El archivo supera el máximo de ${Math.round(limit / MB)} MB.`
@@ -133,10 +140,10 @@ const sendTooLarge = (res, limit) => res.status(413).json({
 // Va antes de todo lo demás de la ruta: si el Content-Length ya anuncia más de lo que cabe,
 // 413 sin leer el cuerpo (Connection: close). Sin Content-Length (chunked), el límite lo
 // aplica multer al llegar al byte de más.
-const checkUploadSize = (req, res, next) => {
+const checkUploadSize = (fieldLimits) => (req, res, next) => {
     req.uploadLimit = limitsFor(req).uploadBytes;
     const length = Number(req.get('Content-Length'));
-    if (Number.isFinite(length) && length > req.uploadLimit + MULTIPART_MARGIN_BYTES) {
+    if (Number.isFinite(length) && length > req.uploadLimit + marginBytes(fieldLimits)) {
         console.warn('Subida rechazada por Content-Length (FILE_TOO_LARGE)');
         res.set('Connection', 'close');
         return sendTooLarge(res, req.uploadLimit);
@@ -145,9 +152,9 @@ const checkUploadSize = (req, res, next) => {
 };
 
 // multer con el límite de esta petición (se crea por petición: el límite puede variar).
-const uploadFile = (req, res, next) => multer({
+const uploadFile = ({ fields, fieldSize }) => (req, res, next) => multer({
     dest: UPLOAD_DIR,
-    limits: { fileSize: req.uploadLimit, files: 1, fields: MAX_FIELDS, fieldSize: MAX_FIELD_BYTES }
+    limits: { fileSize: req.uploadLimit, files: 1, fields, fieldSize }
 }).single('file')(req, res, next);
 
 // ==========================================
@@ -403,7 +410,7 @@ app.get('/v1/queue/status/:id', (req, res) => {
 // ==========================================
 // MÓDULO 1: CENSURA - BÚSQUEDA
 // ==========================================
-app.post('/v1/redact/search', requireOrigin, checkUploadSize, limitPerClient, admitUpload, uploadFile, heavyGate, (req, res) => {
+app.post('/v1/redact/search', requireOrigin, checkUploadSize(FIELDS), limitPerClient, admitUpload, uploadFile(FIELDS), heavyGate, (req, res) => {
     if (!req.file || !req.body.patterns) {
         secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
         return res.status(400).json({ error: 'Falta el archivo o los patrones.' });
@@ -445,7 +452,7 @@ app.post('/v1/redact/search', requireOrigin, checkUploadSize, limitPerClient, ad
 // ==========================================
 // MÓDULO 2: CENSURA - DESTRUCCIÓN Y APLICACIÓN
 // ==========================================
-app.post('/v1/redact/apply', requireOrigin, checkUploadSize, limitPerClient, admitUpload, uploadFile, heavyGate, (req, res) => {
+app.post('/v1/redact/apply', requireOrigin, checkUploadSize(APPLY_FIELDS), limitPerClient, admitUpload, uploadFile(APPLY_FIELDS), heavyGate, (req, res) => {
     if (!req.file || !req.body.items) {
         secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
         return res.status(400).json({ error: 'Falta el archivo o los hallazgos.' });
@@ -603,7 +610,7 @@ const compressArgs = ({ pdfSettings, colorDpi, jpegQFactor }, inputPath, outputP
     ];
 };
 
-app.post('/v1/compress', requireOrigin, checkUploadSize, limitPerClient, admitUpload, uploadFile, heavyGate, (req, res) => {
+app.post('/v1/compress', requireOrigin, checkUploadSize(FIELDS), limitPerClient, admitUpload, uploadFile(FIELDS), heavyGate, (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No se ha subido ningún archivo.' });
     }
@@ -806,6 +813,13 @@ app.use((err, req, res, next) => {
         console.warn(`Subida rechazada (${err.code}${err.field ? `, campo "${err.field}"` : ''})`);
         if (err.code === 'LIMIT_FILE_SIZE') {
             return sendTooLarge(res, req.uploadLimit);
+        }
+        // Lista de hallazgos de /v1/redact/apply por encima de ITEMS_MAX_BYTES.
+        if (err.code === 'LIMIT_FIELD_VALUE' && err.field === 'items') {
+            return res.status(413).json({
+                error: 'ITEMS_TOO_LARGE',
+                message: `La lista de datos que censurar supera el máximo de ${Math.round(ITEMS_MAX_BYTES / MB)} MB.`
+            });
         }
         return res.status(400).json({ error: 'UPLOAD_ERROR', message: 'No se ha podido procesar el archivo subido.' });
     }

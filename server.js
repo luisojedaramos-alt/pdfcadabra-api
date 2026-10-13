@@ -3,6 +3,7 @@ const multer = require('multer');
 const cors = require('cors');
 const { execFile } = require('child_process');
 const fs = require('fs');
+const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
@@ -106,7 +107,8 @@ const PLAN_LIMITS = {
     free: {
         uploadBytes: 50 * MB,
         compressTotalMs: envInt('COMPRESS_TOTAL_TIMEOUT_MS', 180000),
-        redactExecMs: envInt('HEAVY_EXEC_TIMEOUT_MS', 180000)
+        // Como Pro: un vectorial de 51 MB y 2.600 páginas tardó 138-152 s en apply (local).
+        redactExecMs: envInt('HEAVY_EXEC_TIMEOUT_MS', 240000)
     },
     pro: {
         uploadBytes: 100 * MB,
@@ -820,14 +822,24 @@ app.use((err, req, res, next) => {
     res.status(status).json({ error: 'Solicitud no permitida' });
 });
 
+// Tiempo máximo para recibir una petición entera (cabeceras y cuerpo); no cuenta el
+// procesado ni la respuesta. El de Node, 300 s, exigía ~2,8 Mbit/s para subir 100 MB (Pro);
+// con 600 s, ~1,4 Mbit/s (50 MB, ~0,7). Va en las opciones de createServer: asignar
+// server.requestTimeout tras listen no lo aplicaba (comprobado con Node 26: el 408 llegaba
+// a los 60 s del headersTimeout). Las cabeceras siguen teniendo 60 s.
+const REQUEST_TIMEOUT_MS = 600000;
+const startServer = (listenPort, callback) =>
+    http.createServer({ requestTimeout: REQUEST_TIMEOUT_MS }, app).listen(listenPort, callback);
+
 // Iniciar servidor (solo al ejecutarlo con `node server.js`; los tests importan `app`)
 if (require.main === module) {
-    app.listen(port, () => {
+    startServer(port, () => {
         console.log(`Servidor PDFcadabra LegalTech activo en puerto ${port}`);
     });
 }
 
 module.exports = app;
+module.exports.startServer = startServer;
 // Para medir en local con el mismo comando de Ghostscript que el servidor.
 module.exports.compressArgs = compressArgs;
 module.exports.COMPRESS_LEVELS = COMPRESS_LEVELS;

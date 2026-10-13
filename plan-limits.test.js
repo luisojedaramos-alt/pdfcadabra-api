@@ -73,7 +73,7 @@ async function until(cond, what) {
     throw new Error(`No se cumplió: ${what}`);
 }
 
-test('plan gratuito: Anonimizar 180 s por proceso; Comprimir 180 s en total', async (t) => {
+test('plan gratuito: Anonimizar 240 s por proceso; Comprimir 180 s en total', async (t) => {
     const base = await listen(t);
     t.mock.method(console, 'error', () => {});
     post(base, '/v1/redact/search', uuid(1)).catch(() => {});
@@ -81,7 +81,7 @@ test('plan gratuito: Anonimizar 180 s por proceso; Comprimir 180 s en total', as
     await until(() => calls.length === 2, 'los dos procesos lanzados');
     const redact = calls.find((c) => c.args[0] === 'redact.py');
     const protect = calls.find((c) => c.args[0] === 'lossless_images.py');
-    assert.equal(redact.options.timeout, 180000);
+    assert.equal(redact.options.timeout, 240000);
     // Primer proceso de Comprimir: recibe lo que queda del tope total (unos ms menos).
     assert.ok(protect.options.timeout <= 180000 && protect.options.timeout > 179000, `tuvo ${protect.options.timeout}`);
 });
@@ -97,6 +97,17 @@ test('plan Pro: Anonimizar 240 s por proceso; Comprimir 330 s en total', async (
     const protect = calls.find((c) => c.args[0] === 'lossless_images.py');
     assert.equal(redact.options.timeout, 240000);
     assert.ok(protect.options.timeout <= 330000 && protect.options.timeout > 329000, `tuvo ${protect.options.timeout}`);
+});
+
+test('startServer: 600 s para recibir la petición entera (requestTimeout)', async (t) => {
+    const server = app.startServer(0);
+    t.after(() => server.close());
+    await new Promise((r) => server.once('listening', r));
+    assert.equal(server.requestTimeout, 600000);
+    assert.equal(server.headersTimeout, 60000);
+    // Sirve la app de verdad.
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/health`);
+    assert.equal(res.status, 200);
 });
 
 test('un PDF de más de 50 MB ocupa 2 de los 3 huecos; uno de 50 MB exactos, 1', async (t) => {

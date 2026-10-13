@@ -30,7 +30,7 @@
   dentro de los 6), `pids_limit` 512, sin límite de CPU. `NODE_ENV=production`,
   `HEAVY_MAX_CONCURRENT=3`, `HEAVY_MAX_QUEUE=8`. Topes de tiempo, los del código
   (ver Límites por plan): cola 180 s, Comprimir 180 s en total (+30 s de
-  verificación), Anonimizar 180 s por proceso. Health check de Docker a `/health`
+  verificación), Anonimizar 240 s por proceso. Health check de Docker a `/health`
   cada 30 s.
 - Comprobado en el servidor el 2026-10-08 (`docker inspect` del contenedor,
   revisión 5ba1c90). Revisión actual en producción: f25e361 (desplegada el
@@ -267,8 +267,8 @@
 - Decisión de Luis (2026-10-13, según la medición del lote 1b: unos 2,8 s/MB al comprimir
   escaneos en recomendada o extrema y unos 2 s/MB por proceso al anonimizar): gratis 50 MB,
   Pro 100 MB, 200 MB no. `PLAN_LIMITS` en `server.js`:
-  gratis 50 MB, Comprimir 180 s en total, Anonimizar 180 s por proceso; Pro 100 MB, 330 s
-  y 240 s. Variables de entorno: `COMPRESS_TOTAL_TIMEOUT_MS` y `HEAVY_EXEC_TIMEOUT_MS`
+  gratis 50 MB, Comprimir 180 s en total, Anonimizar 240 s por proceso (decisión de Luis,
+  2026-10-14, tras medir apply al 77-85 % de los 180 s iniciales); Pro 100 MB, 330 s y 240 s. Variables de entorno: `COMPRESS_TOTAL_TIMEOUT_MS` y `HEAVY_EXEC_TIMEOUT_MS`
   (gratis, las de siempre), `PRO_COMPRESS_TOTAL_TIMEOUT_MS` y `PRO_HEAVY_EXEC_TIMEOUT_MS`.
   Espera máxima en cola (`HEAVY_QUEUE_TIMEOUT_MS`): 180 s, para todos.
 - Pro no tiene cuentas: `app.locals.planFor(req)` devuelve siempre `'free'` y es donde
@@ -291,15 +291,17 @@
   en recomendada, 104 MB en /tmp; vectorial de 51 MB en low, 87 MB; Anonimizar el vectorial
   (apply), 90 MB, y con una capa OCG, 195 MB.
 - Anonimizar un vectorial de 51 MB (medido en local el 2026-10-13, 2.600 págs., 27.530
-  hallazgos, 10 por página): search 66-70 s y apply 138-152 s, verificado. Apply se queda al
-  77-85 % del tope gratis de 180 s, y el servidor puede ser más lento que el PC. Con
+  hallazgos, 10 por página): search 66-70 s y apply 138-152 s, verificado (58-63 % del tope
+  de 240 s; el servidor puede ser más lento que el PC). Con
   hallazgos en todas las líneas (144 por página, 374.000), search tardó 919 s y dejó un JSON
   de 120 MB: ningún tope razonable lo cubre (504).
 - Timeouts que podrían cortar antes que los topes (revisado el 2026-10-13): Caddy no tiene
   ninguno por defecto para el cuerpo ni la respuesta (solo 1 min para las cabeceras); Node
-  (`server.requestTimeout`, 300 s) solo cuenta mientras se recibe la petición (comprobado:
-  una respuesta lenta tras una subida rápida no lo dispara), así que subir 50 MB exige
-  ~1,4 Mbit/s y 100 MB ~2,8 Mbit/s; multer no tiene tope de tiempo. El barrido de /tmp
+  (`requestTimeout`) solo cuenta mientras se recibe la petición (comprobado: una respuesta
+  lenta tras una subida rápida no lo dispara). Decisión de Luis (2026-10-14): 600 s en vez de
+  los 300 de Node, así que subir 100 MB exige ~1,4 Mbit/s y 50 MB ~0,7. Va en las opciones
+  de `http.createServer` (`startServer`): asignarlo tras `listen` no se aplicaba. Las
+  cabeceras siguen con 60 s. multer no tiene tope de tiempo. El barrido de /tmp
   (15 min) queda por encima de lo más largo que dura una petición tras la subida (540 s en Pro).
   El frontend tiene sus propios topes (Comprimir 240 s en total, Anonimizar 120 s por
   petición): hay que subirlos allí.

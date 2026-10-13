@@ -14,7 +14,7 @@ services:
     image: pdfcadabra-api:local
     restart: unless-stopped
     # Los tiempos máximos son los del código (PLAN_LIMITS en server.js): cola 180 s;
-    # gratis, Comprimir 180 s y Anonimizar 180 s por proceso; Pro (sin cuentas aún), 330 y 240.
+    # gratis, Comprimir 180 s y Anonimizar 240 s por proceso; Pro (sin cuentas aún), 330 y 240.
     environment:
       # CORS solo de pdfcadabra.com y www; sin esto también acepta localhost:3000 y :5173
       # (ver ALLOWED_ORIGINS en server.js).

@@ -33,8 +33,8 @@
   verificación), Anonimizar 240 s por proceso. Health check de Docker a `/health`
   cada 30 s.
 - Comprobado en el servidor el 2026-10-08 (`docker inspect` del contenedor,
-  revisión 5ba1c90). Revisión actual en producción: f25e361 (desplegada el
-  2026-10-10).
+  revisión 5ba1c90). Revisión actual en producción: 11cabc5 (desplegada el
+  2026-10-14).
 
 # Health check
 

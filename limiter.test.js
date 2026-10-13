@@ -76,8 +76,8 @@ test('QUEUE_TIMEOUT: rechaza al agotar la espera y no bloquea el hueco después'
     await assert.rejects(limiter.acquire('b'), { code: 'QUEUE_TIMEOUT' });
     assert.deepEqual(limiter.getStatus('b'), { state: 'unknown' });
 
-    // La tarea cancelada de 'b' sigue en la cola de p-limit: al liberar 'a' no
-    // debe quedarse con el hueco y 'c' debe poder entrar.
+    // 'b' ya salió de la cola: al liberar 'a' no debe quedarse con el hueco y 'c'
+    // debe poder entrar.
     r1();
     const r3 = await limiter.acquire('c');
     assert.deepEqual(limiter.getStatus('c'), { state: 'running' });
@@ -136,4 +136,73 @@ test('un timeout ya cumplido no dispara sobre peticiones que ya empezaron', asyn
     await sleep(80); // pasa el timeout de 'b': no debe cancelarlo
     assert.deepEqual(limiter.getStatus('b'), { state: 'running' });
     rB();
+});
+
+test('peso 2: ocupa dos huecos; con 3, cabe uno de peso 1 más y el siguiente espera', async () => {
+    const limiter = make({ maxConcurrent: 3, maxQueue: 5 });
+    const rBig = await limiter.acquire('big', 2);
+    assert.equal(limiter.slotsInUse(), 2);
+    const rA = await limiter.acquire('a');
+    const pB = limiter.acquire('b');
+    await tick();
+    assert.deepEqual(limiter.getStatus('b'), { state: 'queued', position: 1 });
+
+    rBig();
+    const rB = await pB;
+    assert.equal(limiter.slotsInUse(), 2);
+    rA();
+    rB();
+    assert.equal(limiter.slotsInUse(), 0);
+});
+
+test('peso 2 en cola: FIFO estricto, los de detrás no se le adelantan', async () => {
+    const limiter = make({ maxConcurrent: 3, maxQueue: 5 });
+    const r1 = await limiter.acquire('a');
+    const r2 = await limiter.acquire('b');
+    const started = [];
+    const pBig = limiter.acquire('big', 2).then((r) => { started.push('big'); return r; });
+    const pC = limiter.acquire('c').then((r) => { started.push('c'); return r; });
+    await tick();
+    // Queda un hueco libre, pero 'big' necesita dos y va primero: 'c' espera.
+    assert.deepEqual(started, []);
+    assert.deepEqual(limiter.getStatus('c'), { state: 'queued', position: 2 });
+
+    r1();
+    await tick();
+    assert.deepEqual(started, ['big']);
+    r2();
+    await tick();
+    assert.deepEqual(started, ['big', 'c']);
+    (await pBig)();
+    (await pC)();
+});
+
+test('peso 2 en cola: si se cancela o caduca, entran los de detrás que quepan', async () => {
+    const limiter = make({ maxConcurrent: 3, maxQueue: 5, queueTimeoutMs: 30 });
+    const r1 = await limiter.acquire('a');
+    const r2 = await limiter.acquire('b');
+    const pBig = limiter.acquire('big', 2);
+    const pC = limiter.acquire('c');
+    await assert.rejects(pBig, { code: 'QUEUE_TIMEOUT' });
+    const rC = await pC;
+    assert.deepEqual(limiter.getStatus('c'), { state: 'running' });
+    r1();
+    r2();
+    rC();
+});
+
+test('un peso mayor que maxConcurrent ocupa todos los huecos, no espera para siempre', async () => {
+    const limiter = make({ maxConcurrent: 1, maxQueue: 2 });
+    const rBig = await limiter.acquire('big', 2);
+    assert.equal(limiter.slotsInUse(), 1);
+    rBig();
+});
+
+test('QUEUE_FULL con peso: si no cabe ahora y la cola está llena', async () => {
+    const limiter = make({ maxConcurrent: 3, maxQueue: 0 });
+    const r1 = await limiter.acquire('a', 2);
+    await assert.rejects(limiter.acquire('big', 2), { code: 'QUEUE_FULL' });
+    const r2 = await limiter.acquire('b');
+    r1();
+    r2();
 });

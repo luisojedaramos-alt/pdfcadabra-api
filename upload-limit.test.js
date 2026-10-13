@@ -1,6 +1,7 @@
-// Límite de subida de 20 MB: con 20 MB exactos pasa; con un byte más, 413 FILE_TOO_LARGE
-// (también sin Content-Length); y si el Content-Length ya anuncia de más, el 413 llega sin
-// haber enviado el cuerpo.
+// Límite de subida de 50 MB (plan gratuito): con 50 MB exactos pasa; con un byte más, 413
+// FILE_TOO_LARGE (también sin Content-Length); y si el Content-Length ya anuncia de más, el
+// 413 llega sin haber enviado el cuerpo. Con el plan Pro (aún sin cuentas: se simula con
+// app.locals.planFor), 100 MB.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -31,7 +32,8 @@ assert.ok(UPLOAD_DIR.startsWith(TMP));
 test.after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
 const MB = 1024 * 1024;
-const LIMIT = 20 * MB;
+const LIMIT = 50 * MB;
+const PRO_LIMIT = 100 * MB;
 const BOUNDARY = 'limite-de-prueba';
 const HEAD = Buffer.from(`--${BOUNDARY}\r\nContent-Disposition: form-data; name="file"; filename="in.pdf"\r\nContent-Type: application/pdf\r\n\r\n`);
 const TAIL = Buffer.from(`\r\n--${BOUNDARY}--\r\n`);
@@ -79,18 +81,22 @@ async function listen(t) {
     return server.address().port;
 }
 
-const assertTooLarge = (res) => {
+const assertTooLarge = (res, mb = 50) => {
     assert.equal(res.status, 413);
-    assert.deepEqual(JSON.parse(res.body), { error: 'FILE_TOO_LARGE', message: 'El archivo supera el máximo de 20 MB.' });
+    assert.deepEqual(JSON.parse(res.body), { error: 'FILE_TOO_LARGE', message: `El archivo supera el máximo de ${mb} MB.` });
 };
 
-test('20 MB exactos: pasa', { timeout: 20000 }, async (t) => {
+test('el plan de todas las peticiones es hoy el gratuito', () => {
+    assert.equal(app.locals.planFor({}), 'free');
+});
+
+test('50 MB exactos: pasa', { timeout: 60000 }, async (t) => {
     const port = await listen(t);
     assert.equal((await post(port, LIMIT)).status, 200);
     assert.equal((await post(port, LIMIT, { chunked: true })).status, 200);
 });
 
-test('20 MB + 1 byte: 413 FILE_TOO_LARGE, con y sin Content-Length, sin dejar archivos', { timeout: 20000 }, async (t) => {
+test('50 MB + 1 byte: 413 FILE_TOO_LARGE, con y sin Content-Length, sin dejar archivos', { timeout: 60000 }, async (t) => {
     const port = await listen(t);
     const warn = t.mock.method(console, 'warn', () => {});
     assertTooLarge(await post(port, LIMIT + 1));
@@ -103,12 +109,23 @@ test('20 MB + 1 byte: 413 FILE_TOO_LARGE, con y sin Content-Length, sin dejar ar
 test('Content-Length por encima del límite más el margen del multipart: 413 sin enviar el cuerpo', { timeout: 20000 }, async (t) => {
     const port = await listen(t);
     t.mock.method(console, 'warn', () => {});
-    const res = await post(port, 0, { headersOnly: true, contentLength: 25 * MB + 1 });
+    const res = await post(port, 0, { headersOnly: true, contentLength: 55 * MB + 1 });
     assertTooLarge(res);
     assert.equal(res.headers.connection, 'close');
-    // Justo en el margen (25 MB) no se rechaza por cabecera: lo decide multer con el archivo.
-    const atMargin = post(port, 0, { headersOnly: true, contentLength: 25 * MB });
+    // Justo en el margen (55 MB) no se rechaza por cabecera: lo decide multer con el archivo.
+    const atMargin = post(port, 0, { headersOnly: true, contentLength: 55 * MB });
     atMargin.catch(() => {});
     const first = await Promise.race([atMargin, new Promise((r) => setTimeout(() => r('esperando el cuerpo'), 300))]);
     assert.equal(first, 'esperando el cuerpo');
+});
+
+test('plan Pro: 100 MB exactos pasan; 100 MB + 1 byte, 413; Content-Length por encima de 105 MB, 413 sin cuerpo', { timeout: 120000 }, async (t) => {
+    const port = await listen(t);
+    t.mock.method(console, 'warn', () => {});
+    t.mock.method(app.locals, 'planFor', () => 'pro');
+    assert.equal((await post(port, PRO_LIMIT)).status, 200);
+    assertTooLarge(await post(port, PRO_LIMIT + 1, { chunked: true }), 100);
+    const res = await post(port, 0, { headersOnly: true, contentLength: 105 * MB + 1 });
+    assertTooLarge(res, 100);
+    assert.equal(res.headers.connection, 'close');
 });

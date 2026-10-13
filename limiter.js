@@ -1,5 +1,3 @@
-const pLimit = require('p-limit');
-
 class QueueError extends Error {
     constructor(code, message) {
         super(message);
@@ -7,32 +5,49 @@ class QueueError extends Error {
     }
 }
 
-// Limita cuántas tareas pesadas corren a la vez. p-limit aporta la cola FIFO y
-// los huecos; aquí se añade lo que p-limit no tiene: tope de cola, timeout de
-// espera, cancelación y posición en cola.
+// Limita cuántas tareas pesadas corren a la vez: maxConcurrent huecos, cola FIFO con tope,
+// timeout de espera, cancelación y posición en cola. Cada tarea ocupa `weight` huecos (un
+// archivo grande ocupa dos; nunca más de maxConcurrent). La cola es FIFO estricta: si la
+// primera no cabe, esperan también las de detrás, aunque quepan (si no, una tarea de dos
+// huecos podía esperar para siempre detrás de las de uno).
 function createLimiter({ maxConcurrent, maxQueue, queueTimeoutMs }) {
-    const limit = pLimit(maxConcurrent);
     const tickets = new Map(); // id -> ticket (solo en cola o ejecutando)
     const waiting = [];        // tickets en espera, en orden FIFO
-    // Propio y síncrono: limit.activeCount de p-limit se actualiza de forma
-    // asíncrona y justo tras un release aún cuenta el hueco como ocupado.
-    let active = 0;
+    let used = 0;              // huecos ocupados
 
     const dropWaiting = (ticket) => {
         const i = waiting.indexOf(ticket);
         if (i !== -1) waiting.splice(i, 1);
     };
 
-    // p-limit no permite sacar una tarea de su cola: se marca como cancelada y,
-    // cuando le toque, libera el hueco al instante sin hacer nada.
+    const start = (ticket) => {
+        clearTimeout(ticket.timer);
+        ticket.state = 'running';
+        used += ticket.weight;
+        let released = false;
+        ticket.resolve(() => {
+            if (released) return;
+            released = true;
+            used -= ticket.weight;
+            tickets.delete(ticket.id);
+            drain();
+        });
+    };
+
+    // Arranca las primeras de la cola mientras quepan.
+    const drain = () => {
+        while (waiting.length > 0 && used + waiting[0].weight <= maxConcurrent) start(waiting.shift());
+    };
+
     const cancelQueued = (ticket, err) => {
         if (ticket.state !== 'queued') return false;
-        ticket.cancelled = true;
         ticket.state = 'cancelled';
         clearTimeout(ticket.timer);
         dropWaiting(ticket);
         tickets.delete(ticket.id);
         ticket.reject(err);
+        // Si era la primera y no cabía, las de detrás quizá sí.
+        drain();
         return true;
     };
 
@@ -40,39 +55,24 @@ function createLimiter({ maxConcurrent, maxQueue, queueTimeoutMs }) {
 
     // Devuelve una promesa con `release` (idempotente). Rechaza con QueueError
     // QUEUE_FULL, QUEUE_TIMEOUT o CANCELLED.
-    const acquire = (id) => {
+    const acquire = (id, weight = 1) => {
         if (has(id)) {
             return Promise.reject(new QueueError('DUPLICATE_ID', `Id ya en uso: ${id}`));
         }
-        if (waiting.length >= maxQueue && active >= maxConcurrent) {
+        const w = Math.min(Math.max(1, weight), maxConcurrent);
+        const fitsNow = waiting.length === 0 && used + w <= maxConcurrent;
+        if (!fitsNow && waiting.length >= maxQueue) {
             return Promise.reject(new QueueError('QUEUE_FULL', 'Cola de procesamiento llena.'));
         }
 
         return new Promise((resolve, reject) => {
-            const ticket = { id, state: 'queued', cancelled: false, timer: null, reject };
+            const ticket = { id, weight: w, state: 'queued', timer: null, resolve, reject };
             tickets.set(id, ticket);
+            if (fitsNow) return start(ticket);
             waiting.push(ticket);
-
             ticket.timer = setTimeout(() => {
                 cancelQueued(ticket, new QueueError('QUEUE_TIMEOUT', 'Tiempo máximo de espera en cola agotado.'));
             }, queueTimeoutMs);
-
-            limit(() => new Promise((freeSlot) => {
-                if (ticket.cancelled) return freeSlot();
-                clearTimeout(ticket.timer);
-                dropWaiting(ticket);
-                ticket.state = 'running';
-                active++;
-
-                let released = false;
-                resolve(() => {
-                    if (released) return;
-                    released = true;
-                    active--;
-                    tickets.delete(id);
-                    freeSlot();
-                });
-            }));
         });
     };
 
@@ -94,8 +94,10 @@ function createLimiter({ maxConcurrent, maxQueue, queueTimeoutMs }) {
     // rechazar una subida antes de recibirla si ya no habría sitio.
     const load = () => tickets.size;
     const capacity = maxConcurrent + maxQueue;
+    // Huecos ocupados (una tarea grande cuenta por dos).
+    const slotsInUse = () => used;
 
-    return { acquire, cancel, has, getStatus, load, capacity };
+    return { acquire, cancel, has, getStatus, load, capacity, slotsInUse };
 }
 
 module.exports = { createLimiter, QueueError };

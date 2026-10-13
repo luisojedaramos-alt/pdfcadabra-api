@@ -87,14 +87,39 @@ app.get('/health', (req, res) => {
 const UPLOAD_DIR = path.join(os.tmpdir(), 'pdfcadabra-uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-// Tamaño máximo del PDF subido. uploadLimitFor es el punto donde entraría un límite
-// mayor para usuarios de pago; hoy es el mismo para todos.
+const envInt = (name, fallback) => {
+    const n = parseInt(process.env[name], 10);
+    return Number.isInteger(n) && n >= 0 ? n : fallback;
+};
+
+// Límites de cada plan: tamaño máximo del PDF subido y topes de tiempo. Medido (lote 1b):
+// unos 2,8 s/MB al comprimir escaneos en recomendada o extrema y unos 2 s/MB por proceso
+// al anonimizar; los topes llevan margen sobre eso.
+//   compressTotalMs: tope TOTAL de /v1/compress (lossless_images.py, gs y jpeg_flate.py,
+//     también los de la red de seguridad con el nivel low; verify va aparte).
+//   redactExecMs: tope por proceso de Anonimizar (redact.py search o apply).
+// Hoy todas las peticiones son del plan gratuito: planFor (app.locals.planFor) es donde
+// entrará la cuenta Pro, que aún no existe. Las variables de entorno sin PRO_ son las de
+// siempre y cambian el plan gratuito.
 const MB = 1024 * 1024;
-const MAX_UPLOAD_BYTES = 20 * MB;
-const uploadLimitFor = (req) => MAX_UPLOAD_BYTES;
+const PLAN_LIMITS = {
+    free: {
+        uploadBytes: 50 * MB,
+        compressTotalMs: envInt('COMPRESS_TOTAL_TIMEOUT_MS', 180000),
+        redactExecMs: envInt('HEAVY_EXEC_TIMEOUT_MS', 180000)
+    },
+    pro: {
+        uploadBytes: 100 * MB,
+        compressTotalMs: envInt('PRO_COMPRESS_TOTAL_TIMEOUT_MS', 330000),
+        redactExecMs: envInt('PRO_HEAVY_EXEC_TIMEOUT_MS', 240000)
+    }
+};
+app.locals.planFor = (req) => 'free';
+const limitsFor = (req) => (req.planLimits ||= PLAN_LIMITS[app.locals.planFor(req) === 'pro' ? 'pro' : 'free']);
 // Campos de texto del multipart (level, patterns, items): como mucho MAX_FIELDS de
 // MAX_FIELD_BYTES (1 MB, el valor por defecto de multer). Con eso, el cuerpo entero nunca
-// pasa de límite del archivo + MULTIPART_MARGIN_BYTES (Caddy corta en 25 MB = 20 + 5).
+// pasa de límite del archivo + MULTIPART_MARGIN_BYTES (Caddy corta en 106 MB, por encima
+// de 100 + 5 del plan Pro: el 413 lo da siempre la API).
 const MAX_FIELDS = 4;
 const MAX_FIELD_BYTES = 1 * MB;
 const MULTIPART_MARGIN_BYTES = MAX_FIELDS * MAX_FIELD_BYTES + 1 * MB;
@@ -107,7 +132,7 @@ const sendTooLarge = (res, limit) => res.status(413).json({
 // 413 sin leer el cuerpo (Connection: close). Sin Content-Length (chunked), el límite lo
 // aplica multer al llegar al byte de más.
 const checkUploadSize = (req, res, next) => {
-    req.uploadLimit = uploadLimitFor(req);
+    req.uploadLimit = limitsFor(req).uploadBytes;
     const length = Number(req.get('Content-Length'));
     if (Number.isFinite(length) && length > req.uploadLimit + MULTIPART_MARGIN_BYTES) {
         console.warn('Subida rechazada por Content-Length (FILE_TOO_LARGE)');
@@ -169,9 +194,10 @@ const removeTempDir = (dir) => {
 
 // Red de seguridad: borra de UPLOAD_DIR lo que tenga más de 15 minutos, al arrancar y
 // cada 5 minutos (archivos que quedaron si el proceso murió a mitad de una petición).
-// Ninguna petición legítima dura tanto: cola máx. 90 s + máx. 180 s por proceso (por
-// defecto) en Anonimizar; Comprimir encadena hasta cinco procesos (lossless_images.py, gs
-// y jpeg_flate.py, más la red de seguridad), pero todos dentro de COMPRESS_TOTAL_TIMEOUT_MS.
+// Ninguna petición legítima dura tanto desde que termina la subida: cola máx. 180 s + un
+// proceso de máx. 240 s (Pro) en Anonimizar; en Comprimir, todos sus procesos dentro de
+// compressTotalMs (máx. 330 s, Pro) más 30 s de verify: 540 s. El envío de la respuesta no
+// cuenta: un archivo borrado mientras se envía se sigue leyendo (Linux).
 const SWEEP_MAX_AGE_MS = 15 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 startPeriodicSweep(UPLOAD_DIR, SWEEP_MAX_AGE_MS, SWEEP_INTERVAL_MS);
@@ -193,19 +219,7 @@ const cleanupOnClose = (req, res, cleanup) => {
 // Con poca RAM, varios procesos hijos a la vez provocan OOM. Solo corren
 // HEAVY_MAX_CONCURRENT a la vez; el resto espera en cola (máx. HEAVY_MAX_QUEUE,
 // máx. HEAVY_QUEUE_TIMEOUT_MS) y, si no cabe o se agota la espera, recibe un 503.
-const envInt = (name, fallback) => {
-    const n = parseInt(process.env[name], 10);
-    return Number.isInteger(n) && n >= 0 ? n : fallback;
-};
-// Tope por proceso de Anonimizar (redact.py search/apply). Comprimir usa su propio tope
-// total, COMPRESS_TOTAL_TIMEOUT_MS.
-const HEAVY_EXEC_TIMEOUT_MS = envInt('HEAVY_EXEC_TIMEOUT_MS', 180000);
-// Tope TOTAL de /v1/compress: lossless_images.py, Ghostscript y jpeg_flate.py juntos, también los de la red de
-// seguridad con el nivel low. Peor caso medido en la
-// instancia 0.5c-512mb (escaneo sintético de 20 MB y 23 páginas, nivel extremo): 14,4 s de
-// gs + 0,4 s de jpeg_flate.py. 90 s dejan margen para escaneos reales con muchas más
-// páginas: gs escala con páginas y píxeles, no con MB.
-const COMPRESS_TOTAL_TIMEOUT_MS = envInt('COMPRESS_TOTAL_TIMEOUT_MS', 90000);
+// Los topes de tiempo de cada proceso van en PLAN_LIMITS.
 // Tope de pdf_check.py verify, la comprobación del resultado antes de entregarlo (abre las dos
 // versiones y mira el texto y las imágenes de cada página: segundos incluso con cientos).
 const VERIFY_TIMEOUT_MS = envInt('VERIFY_TIMEOUT_MS', 30000);
@@ -213,8 +227,14 @@ const RETRY_AFTER_SECONDS = 10;
 const heavyLimiter = createLimiter({
     maxConcurrent: Math.max(1, envInt('HEAVY_MAX_CONCURRENT', 1)),
     maxQueue: envInt('HEAVY_MAX_QUEUE', 5),
-    queueTimeoutMs: envInt('HEAVY_QUEUE_TIMEOUT_MS', 90000)
+    queueTimeoutMs: envInt('HEAVY_QUEUE_TIMEOUT_MS', 180000)
 });
+// Un PDF de más de LARGE_JOB_BYTES (el límite del plan gratuito, así que hoy solo Pro)
+// ocupa LARGE_JOB_WEIGHT huecos de HEAVY_MAX_CONCURRENT: gs y PyMuPDF usan más memoria y
+// /tmp con él. Con 3 huecos, a la vez: uno grande y uno normal, o tres normales.
+const LARGE_JOB_BYTES = PLAN_LIMITS.free.uploadBytes;
+const LARGE_JOB_WEIGHT = 2;
+const jobWeight = (file) => (file.size > LARGE_JOB_BYTES ? LARGE_JOB_WEIGHT : 1);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const QUEUE_ERRORS = {
@@ -242,7 +262,7 @@ const heavyGate = async (req, res, next) => {
     });
 
     try {
-        const acquiring = heavyLimiter.acquire(id);
+        const acquiring = heavyLimiter.acquire(id, jobWeight(req.file));
         // Ya cuenta en el limiter (acquire lo registra al momento): deja de contar como subida.
         req.endUpload();
         req.releaseSlot = await acquiring;
@@ -328,7 +348,7 @@ const limitPerClient = (req, res, next) => {
 // su cadena, también si un proceso devuelve error (release es idempotente).
 // Si el cliente ya se fue (abortHeavy), no lanza nada, y si se va con el proceso en
 // marcha, no llama a `callback`: la cadena se corta ahí y solo se repiten los borrados.
-const runHeavy = (req, command, args, callback, { keepSlot = false, timeoutMs = HEAVY_EXEC_TIMEOUT_MS, env } = {}) => {
+const runHeavy = (req, command, args, callback, { keepSlot = false, timeoutMs = limitsFor(req).redactExecMs, env } = {}) => {
     if (req.heavyAborted) {
         runAbortCleanups(req);
         return null;
@@ -621,7 +641,7 @@ app.post('/v1/compress', requireOrigin, checkUploadSize, limitPerClient, admitUp
     // Todos los procesos (gs y jpeg_flate.py, también los de la red de seguridad) comparten
     // un único tope: cada uno solo tiene lo que sobre. El hueco de la cola se mantiene hasta
     // la respuesta (keepSlot) y se libera al enviarla (release es idempotente).
-    const deadline = Date.now() + COMPRESS_TOTAL_TIMEOUT_MS;
+    const deadline = Date.now() + limitsFor(req).compressTotalMs;
     const remaining = () => deadline - Date.now();
     const releaseSlot = () => {
         if (req.releaseSlot) req.releaseSlot();

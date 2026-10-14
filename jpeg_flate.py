@@ -19,9 +19,10 @@ import pymupdf
 
 import lossless_images
 
-# Una imagen protegida que referencia una cadena de objetos demasiado larga para copiarla
-# (lossless_images.NestingTooDeep): server.js devuelve el original sin tocar.
-EXIT_TOO_DEEP = 4
+# Las imágenes protegidas no se han podido restaurar (cualquier lossless_images.RestoreError:
+# un marcador sin restaurar, uno cuya imagen original no existe o una imagen demasiado anidada
+# para copiarla): no se escribe la salida y server.js devuelve el original sin tocar.
+EXIT_RESTORE_FAILED = 4
 
 
 def main(input_path, output_path, originals_path=None):
@@ -66,6 +67,7 @@ if __name__ == "__main__":
         sys.exit(2)
     try:
         main(args[0], args[1], originals)
-    except lossless_images.NestingTooDeep as e:
-        print(f"No se pueden restaurar las imágenes protegidas: {e}", file=sys.stderr)
-        sys.exit(EXIT_TOO_DEEP)
+    except lossless_images.RestoreError as e:
+        # Solo el tipo de fallo: ni rutas ni datos del documento.
+        print(f"No se pueden restaurar las imágenes protegidas ({type(e).__name__})", file=sys.stderr)
+        sys.exit(EXIT_RESTORE_FAILED)

@@ -320,8 +320,8 @@ def make_deep_pdf(path, depth):
 
 class AnidamientoProfundo(unittest.TestCase):
     """restore copia la imagen original y todo lo que referencia: con una cadena de referencias
-    más larga que MAX_NESTING falla con NestingTooDeep (jpeg_flate.py sale con EXIT_TOO_DEEP y
-    server.js devuelve el original), nunca copia a medias en silencio. Antes, con unos 330
+    más larga que MAX_NESTING falla con NestingTooDeep (jpeg_flate.py sale con EXIT_RESTORE_FAILED
+    y server.js devuelve el original), nunca copia a medias en silencio. Antes, con unos 330
     niveles, RecursionError: jpeg_flate.py salía con 1 y /v1/compress respondía 500."""
 
     def _restore(self, depth):
@@ -341,18 +341,65 @@ class AnidamientoProfundo(unittest.TestCase):
     def test_dentro_del_limite_se_restaura(self):
         self.assertEqual(self._restore(li.MAX_NESTING - 10), 1)
 
-    def test_jpeg_flate_sale_con_su_codigo(self):
+
+def make_marker_pdf(path, orig_xref, inline=False):
+    """Salida de Ghostscript simulada con un marcador que apunta a `orig_xref` del original: como
+    imagen (64x2) o, con inline, dentro del contenido de la página (imagen en línea)."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    if inline:
+        page.insert_text((0, 0), " ")
+        doc.update_stream(page.get_contents()[0], b"q 10 0 0 10 0 0 cm BI /IM true /W 64 /H 2 /BPC 1 ID "
+                          + li.marker_bytes(orig_xref) + b" EI Q")
+    else:
+        page.insert_image(pymupdf.Rect(72, 72, 136, 74), pixmap=pymupdf.Pixmap(pymupdf.csGRAY, 8, 1, b"\x00" * 8, 0))
+        img = next(x for x in range(1, doc.xref_length()) if doc.xref_get_key(x, "Subtype") == ("name", "/Image"))
+        doc.update_object(img, f"<</Type/XObject/Subtype/Image/Width {li.MARK_W}/Height {li.MARK_H}"
+                               "/ImageMask true/BitsPerComponent 1>>")
+        doc.update_stream(img, li.marker_bytes(orig_xref), compress=False)
+    doc.save(path)
+    doc.close()
+
+
+class RestauracionFallida(unittest.TestCase):
+    """Cualquier RestoreError al restaurar (profundidad, marcador sin restaurar, marcador cuya
+    imagen original no existe): jpeg_flate.py sale con EXIT_RESTORE_FAILED, sin traza y sin
+    escribir la salida, y server.js devuelve el original sin tocar. Antes, solo la profundidad;
+    los otros dos salían con 1 y /v1/compress respondía 500."""
+
+    def _run(self, marked, src):
+        out = os.path.join(os.path.dirname(marked), "out.pdf")
+        proc = subprocess.run([sys.executable, os.path.join(API_DIR, "jpeg_flate.py"), marked, out, "--originals", src],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, jpeg_flate.EXIT_RESTORE_FAILED, proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertNotIn(os.path.dirname(marked), proc.stderr)  # sin rutas
+        self.assertFalse(os.path.exists(out))
+
+    def test_profundidad(self):
         d = tmp_dir(self)
-        src, marked, out = (os.path.join(d, n) for n in ("in.pdf", "marked.pdf", "out.pdf"))
+        src, marked = os.path.join(d, "in.pdf"), os.path.join(d, "marked.pdf")
         make_deep_pdf(src, 3000)
         doc = pymupdf.open(src)
         li.protect(doc)
         doc.save(marked)
-        proc = subprocess.run([sys.executable, os.path.join(API_DIR, "jpeg_flate.py"), marked, out, "--originals", src],
-                              capture_output=True, text=True)
-        self.assertEqual(proc.returncode, jpeg_flate.EXIT_TOO_DEEP, proc.stderr)
-        self.assertNotIn("Traceback", proc.stderr)
-        self.assertFalse(os.path.exists(out))
+        self._run(marked, src)
+
+    def test_marcador_sin_restaurar_en_el_contenido(self):
+        d = tmp_dir(self)
+        src, marked = os.path.join(d, "in.pdf"), os.path.join(d, "marked.pdf")
+        make_deep_pdf(src, 1)
+        make_marker_pdf(marked, 5, inline=True)
+        self._run(marked, src)
+
+    def test_marcador_cuya_imagen_original_no_existe(self):
+        d = tmp_dir(self)
+        src, marked = os.path.join(d, "in.pdf"), os.path.join(d, "marked.pdf")
+        make_deep_pdf(src, 1)
+        for orig in (1, 99999):  # el catálogo (no es una imagen) y un objeto que no existe
+            with self.subTest(orig=orig):
+                make_marker_pdf(marked, orig)
+                self._run(marked, src)
 
 
 @unittest.skipUnless(GS and NODE, "hace falta Ghostscript y node para comprimir de verdad")

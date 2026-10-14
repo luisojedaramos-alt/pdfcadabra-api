@@ -68,8 +68,30 @@ for _ in range(2999):
     last = x
 doc.xref_set_key(img, "Foo", f"{last} 0 R")
 doc.save(os.path.join(d, "hondo.pdf"))
+# Como plain.pdf con una imagen de 1 bit (protegida), y dos salidas de Ghostscript simuladas
+# que no se pueden restaurar: un marcador dentro del contenido de la página y un marcador
+# cuyo objeto en el original no es una imagen (el 1).
+import lossless_images as li
+doc = pymupdf.open(os.path.join(d, "plain.pdf"))
+doc[0].insert_image(pymupdf.Rect(60, 520, 160, 620), pixmap=pymupdf.Pixmap(pymupdf.csGRAY, 8, 1, b"\\x00" * 8, 0))
+img = max(x for x in range(1, doc.xref_length()) if doc.xref_get_key(x, "Subtype") == ("name", "/Image"))
+doc.update_object(img, "<</Type/XObject/Subtype/Image/Width 8/Height 1/ColorSpace/DeviceGray/BitsPerComponent 1>>")
+doc.update_stream(img, b"\\x55", compress=False)
+doc.save(os.path.join(d, "protegida.pdf"))
+doc = pymupdf.open()
+page = doc.new_page()
+page.insert_text((0, 0), " ")
+doc.update_stream(page.get_contents()[0], b"q 10 0 0 10 0 0 cm BI /IM true /W 64 /H 2 /BPC 1 ID " + li.marker_bytes(img) + b" EI Q")
+doc.save(os.path.join(d, "gs-marcador-en-contenido.pdf"))
+doc = pymupdf.open()
+page = doc.new_page()
+page.insert_image(pymupdf.Rect(72, 72, 136, 74), pixmap=pymupdf.Pixmap(pymupdf.csGRAY, 8, 1, b"\\x00" * 8, 0))
+mark = max(x for x in range(1, doc.xref_length()) if doc.xref_get_key(x, "Subtype") == ("name", "/Image"))
+doc.update_object(mark, "<</Type/XObject/Subtype/Image/Width 64/Height 2/ImageMask true/BitsPerComponent 1>>")
+doc.update_stream(mark, li.marker_bytes(1), compress=False)
+doc.save(os.path.join(d, "gs-marcador-sin-original.pdf"))
 `;
-if (!skip) childProcess.execFileSync(PYTHON, ['-c', SAMPLES, DIR]);
+if (!skip) childProcess.execFileSync(PYTHON, ['-c', SAMPLES, DIR], { cwd: __dirname });
 test.after(() => fs.rmSync(DIR, { recursive: true, force: true }));
 
 // server.js llama a 'python3' y 'gs'; aquí se traducen a los de esta máquina. `gsOverride`
@@ -155,12 +177,28 @@ test('Comprimir nunca entrega menos páginas: si gs pierde páginas, devuelve el
     }
 });
 
-test('Comprimir con una imagen protegida demasiado anidada para restaurarla: devuelve el original', { skip }, async (t) => {
-    t.mock.method(console, 'warn', () => {});
-    for (const level of ['extreme', 'recommended', 'low']) {
-        const { res, body, input } = await post(t, '/v1/compress', 'hondo.pdf', { level });
-        assert.equal(res.status, 200, level);
-        assert.equal(res.headers.get('x-compress-status'), 'already-optimized', level);
-        assert.ok(body.equals(input), `${level}: debe ser el original sin tocar`);
-    }
-});
+// Imágenes protegidas que no se pueden restaurar tras Ghostscript (cualquier RestoreError):
+// el original sin tocar, y en el log solo el motivo genérico, sin rutas ni nombres.
+const RESTORE_CASES = [
+    ['demasiado anidada', 'hondo.pdf', null],
+    ['marcador sin restaurar (en el contenido)', 'protegida.pdf', 'gs-marcador-en-contenido.pdf'],
+    ['marcador sin imagen original', 'protegida.pdf', 'gs-marcador-sin-original.pdf'],
+];
+for (const [name, sample, gsOut] of RESTORE_CASES) {
+    test(`Comprimir, imagen protegida que no se puede restaurar (${name}): devuelve el original`, { skip }, async (t) => {
+        gsOverride = gsOut && path.join(DIR, gsOut);
+        t.after(() => { gsOverride = null; });
+        const logs = [];
+        for (const method of ['warn', 'error', 'log']) t.mock.method(console, method, (...args) => logs.push(args.join(' ')));
+        for (const level of ['extreme', 'recommended', 'low']) {
+            const { res, body, input } = await post(t, '/v1/compress', sample, { level });
+            assert.equal(res.status, 200, level);
+            assert.equal(res.headers.get('x-compress-status'), 'already-optimized', level);
+            assert.ok(body.equals(input), `${level}: debe ser el original sin tocar`);
+        }
+        assert.ok(logs.some((l) => l === 'No se han podido restaurar las imágenes protegidas; se devuelve el original.'), logs.join('\n'));
+        for (const line of logs) {
+            assert.ok(!/pdfcadabra-uploads|[\\/]tmp|\.pdf|marcador|referencias/i.test(line), `log con detalles: ${line}`);
+        }
+    });
+}

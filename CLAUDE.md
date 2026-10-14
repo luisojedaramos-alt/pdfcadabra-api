@@ -194,10 +194,16 @@
   `-dMaxInlineImageSize=0` (si no, mete los marcadores en el contenido) y sin reducir B/N.
   Con marcadores, la salida de gs nunca se envía sin restaurar: si el tope se agota antes, 504.
 - Anidamiento (desde 2026-10-14): al restaurar, `_copy` no sigue más de `MAX_NESTING` (200)
-  referencias desde la imagen original: si hace falta más, `NestingTooDeep`, jpeg_flate.py sale
-  con `EXIT_TOO_DEEP` (4) y `/v1/compress` devuelve el original sin tocar (200,
-  `already-optimized`). Antes, hacia los 330 niveles, RecursionError y 500. Tests en
-  `lossless_images_test.py` (`AnidamientoProfundo`) y `pdf-encrypted.test.js`.
+  referencias desde la imagen original: si hace falta más, `NestingTooDeep` (un `RestoreError`).
+  Antes, hacia los 330 niveles, RecursionError y 500. Test en `lossless_images_test.py`
+  (`AnidamientoProfundo`).
+- Restauración fallida (desde 2026-10-15): cualquier `RestoreError` (marcador sin restaurar, también
+  dentro de un contenido; marcador cuya imagen original no existe o no es una imagen; imagen
+  demasiado anidada) hace que jpeg_flate.py salga con `EXIT_RESTORE_FAILED` (4) sin escribir la
+  salida, y `/v1/compress` devuelve el original sin tocar (200, `already-optimized`). Al log solo
+  va el motivo genérico ("No se han podido restaurar las imágenes protegidas"), ni el stderr ni
+  rutas. Antes, salvo la profundidad, 500. Tests en `lossless_images_test.py`
+  (`RestauracionFallida`) y `pdf-encrypted.test.js`.
 - Decisión de Luis (2026-10-03): la regla se aplica completa, también a las máscaras de texto
   de página completa de los escaneos (ImageMask de 1 bit), aunque pesen más. Motivo: los
   escaneos judiciales llevan el código CSV (barras o QR) dentro de esa misma imagen de página,

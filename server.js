@@ -572,8 +572,8 @@ app.post('/v1/redact/apply', requireOrigin, checkUploadSize(APPLY_FIELDS), limit
 // ==========================================
 // Ahorro mínimo (2 %) para devolver un resultado en vez del original.
 const MIN_COMPRESS_SAVING = 0.02;
-// jpeg_flate.EXIT_TOO_DEEP: una imagen protegida no se puede restaurar (demasiado anidada).
-const EXIT_TOO_DEEP = 4;
+// jpeg_flate.EXIT_RESTORE_FAILED: las imágenes protegidas no se han podido restaurar.
+const EXIT_RESTORE_FAILED = 4;
 
 // Niveles de compresión: preset de Ghostscript + resolución objetivo (ppp) de las
 // imágenes en color/gris (null = no se reducen) + calidad
@@ -706,10 +706,12 @@ app.post('/v1/compress', requireOrigin, checkUploadSize(FIELDS), limitPerClient,
                         console.warn('Tope de compresión agotado en jpeg_flate.py; se usa la salida de Ghostscript.');
                         return done(null, gsPath);
                     }
-                    // Imagen protegida demasiado anidada para restaurarla: la salida llevaría
-                    // marcadores. Se devuelve el original sin tocar (como la red de seguridad).
-                    if (error && error.code === EXIT_TOO_DEEP && !isExecTimeout(error)) {
-                        console.warn('Imagen protegida demasiado anidada para restaurarla; se devuelve el original.');
+                    // Imágenes protegidas que no se han podido restaurar (un marcador sin restaurar,
+                    // uno sin imagen original, una demasiado anidada): la salida llevaría marcadores.
+                    // Se devuelve el original sin tocar (como la red de seguridad). Al log, solo el
+                    // motivo genérico: ni el stderr ni rutas.
+                    if (error && error.code === EXIT_RESTORE_FAILED && !isExecTimeout(error)) {
+                        console.warn('No se han podido restaurar las imágenes protegidas; se devuelve el original.');
                         return done({ keepOriginal: true });
                     }
                     if (error) return done({ error, stderr, label: 'Error en el paso posterior de la compresión:' });

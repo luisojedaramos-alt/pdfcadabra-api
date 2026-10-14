@@ -442,6 +442,36 @@ class BusquedaConRepeticiones(unittest.TestCase):
         self.assertEqual(len({tuple(r["rect"]) for r in results}), 4)
 
 
+class DocumentosCerrados(unittest.TestCase):
+    """search() y main() cierran los documentos que abren (antes no: en Windows, el PDF de
+    entrada no se podía borrar mientras quedase una referencia)."""
+
+    def test_search_y_main_cierran_lo_que_abren(self):
+        import json
+        from unittest import mock
+        src, res, pat = tmp_path(self, "in.pdf"), tmp_path(self, "r.json"), tmp_path(self, "p.json")
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 72), f"Expediente {TERM}")
+        doc.save(src)
+        doc.close()
+        with open(pat, "w", encoding="utf-8") as f:
+            json.dump({"Personalizado": TERM}, f)
+        opened = []
+        real_open = fitz.open
+
+        def tracking_open(*args, **kwargs):
+            d = real_open(*args, **kwargs)
+            opened.append(d)
+            return d
+
+        with mock.patch.object(redact.fitz, "open", side_effect=tracking_open):
+            redact.main(["redact.py", "search", src, pat, res])
+        self.assertGreaterEqual(len(opened), 2)  # la comprobación de contraseña y la búsqueda
+        self.assertTrue(all(d.is_closed for d in opened), [d.is_closed for d in opened])
+        with open(res, encoding="utf-8") as f:
+            self.assertEqual(len(json.load(f)["results"]), 1)
+
+
 class PatronesNoValidos(unittest.TestCase):
     """search: patterns tiene que ser un objeto y cada patrón una cadena no vacía. Si no, sale
     con EXIT_BAD_PATTERNS (server.js responde 400), nunca con el 1 de un error inesperado (500).

@@ -1403,6 +1403,17 @@ def search(input_path, patterns_path, results_path):
     patterns = load_patterns(patterns_path)
 
     doc = fitz.open(input_path)
+    try:
+        results, errors = _find_all(doc, patterns)
+    finally:
+        doc.close()
+
+    with open(results_path, 'w', encoding='utf-8') as f:
+        json.dump({"results": results, "errors": errors}, f)
+
+
+def _find_all(doc, patterns):
+    """Hallazgos (results) y errores de patrón (errors) de search en doc, que queda aplanado."""
     # Se busca sobre el documento aplanado, igual que el que censura apply: así también
     # aparecen los valores de los campos de formulario y el texto de las anotaciones.
     # Sus posiciones coinciden con las del original (el aplanado dibuja la apariencia del
@@ -1487,8 +1498,7 @@ def search(input_path, patterns_path, results_path):
                 seen_coordinates.add(coord_hash)
                 results.append(r)
 
-    with open(results_path, 'w', encoding='utf-8') as f:
-        json.dump({"results": results, "errors": errors}, f)
+    return results, errors
 
 
 def item_zone(doc, item):
@@ -1679,7 +1689,9 @@ def main(argv):
     input_path = argv[2]
     # Con contraseña de apertura no se busca ni se censura nada: server.js responde 422
     # PDF_ENCRYPTED. Los de solo propietario se abren con la contraseña vacía y siguen.
-    if pdf_check.needs_password(fitz.open(input_path)):
+    with fitz.open(input_path) as doc:
+        encrypted = pdf_check.needs_password(doc)
+    if encrypted:
         print("PDF con contraseña de apertura", file=sys.stderr)
         sys.exit(pdf_check.EXIT_ENCRYPTED)
     if action == "search":

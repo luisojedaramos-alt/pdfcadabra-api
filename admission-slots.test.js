@@ -74,8 +74,10 @@ test('peso 2 + peso 1 en marcha y 8 en cola: la siguiente subida, 503 sin enviar
     await until(async () => (await status(base, uuid(1))).state === 'running', 'el grande en marcha');
     post(base, uuid(2), 1000);
     await until(async () => (await status(base, uuid(2))).state === 'running', 'el normal en marcha');
-    for (let i = 3; i <= 10; i++) post(base, uuid(i), 1000);
-    await until(async () => (await status(base, uuid(10))).position === 8, '8 en cola');
+    const queued = [3, 4, 5, 6, 7, 8, 9, 10].map(uuid);
+    queued.forEach((id) => post(base, id, 1000));
+    // Llegan en cualquier orden: se espera a que estén las 8 en cola, no a una posición concreta.
+    await until(async () => (await Promise.all(queued.map((id) => status(base, id)))).every((s) => s.state === 'queued'), '8 en cola');
 
     // Solo cabeceras: anuncia 1 MB que nunca envía.
     const BOUNDARY = 'limite-de-prueba';

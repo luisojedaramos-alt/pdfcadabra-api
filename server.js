@@ -407,6 +407,10 @@ const isExecTimeout = (error) => error.killed && error.signal === 'SIGKILL';
 // abren con la contraseña vacía y se procesan como cualquier otro.
 const EXIT_ENCRYPTED = 3;
 const isEncryptedExit = (error) => !!error && error.code === EXIT_ENCRYPTED && !isExecTimeout(error);
+// redact.py search con patrones que son un objeto JSON (eso ya lo mira requirePatterns) pero
+// con algún valor que no es una cadena no vacía: redact.EXIT_BAD_PATTERNS, 400.
+const EXIT_BAD_PATTERNS = 4;
+const isBadPatternsExit = (error) => !!error && error.code === EXIT_BAD_PATTERNS && !isExecTimeout(error);
 const sendEncrypted = (res) => res.status(422).json({
     code: 'PDF_ENCRYPTED',
     error: 'Este PDF está protegido con contraseña. Quítala primero con Desbloquear PDF y vuelve a intentarlo.'
@@ -446,9 +450,13 @@ app.post('/v1/redact/search', requireOrigin, checkUploadSize(FIELDS), limitPerCl
 
         runHeavy(req, 'python3', ['redact.py', 'search', inputPath, patternsPath, resultsPath], (error, stdout, stderr) => {
             if (error) {
+                secureCleanup([inputPath, patternsPath, resultsPath]);
+                if (isBadPatternsExit(error)) {
+                    console.warn('[Redact] Patrones no válidos: 400.');
+                    return res.status(400).json({ code: 'BAD_PATTERNS', error: 'Los patrones de búsqueda no son válidos.' });
+                }
                 if (isEncryptedExit(error)) console.warn('[Redact] PDF con contraseña de apertura: 422 sin procesar.');
                 else logProcessError("Error en búsqueda:", error, stderr);
-                secureCleanup([inputPath, patternsPath, resultsPath]);
                 return sendExecError(res, error, 'Error analizando el documento.');
             }
 

@@ -156,6 +156,11 @@
   página (por orden, un QR podía tomar la calidad JPEG de una foto del mismo tamaño). Una copia
   con 16 colores o menos nunca pasa a JPEG. MuPDF convierte las Indexed censuradas a RGB de 8
   bits: quedan en Flate, sin pérdida.
+- Patrones de search (`load_patterns`, desde 2026-10-14): un objeto cuyos valores son cadenas no
+  vacías; si no, sale con `EXIT_BAD_PATTERNS` (4) y `server.js` responde 400 `BAD_PATTERNS` (antes,
+  500; y un patrón vacío casaba en cada posición sin encontrar nada). Un patrón que no compila
+  sigue siendo un error de su categoría en `errors`. Tests en `redact_test.py`
+  (`PatronesNoValidos`) y `redact-bad-patterns.test.js`.
 - Tests: `python -m unittest redact_test.py` (PyMuPDF real, PDFs sintéticos) y
   `redact-verify.test.js` (ruta con redact.py simulado, dentro de `npm test`).
 

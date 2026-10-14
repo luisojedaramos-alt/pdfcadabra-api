@@ -26,6 +26,13 @@ MIN_TERM_LEN = 3
 
 MANUAL_CATEGORY = "Censura Manual"
 
+# search con patrones que no son un objeto de cadenas no vacías: server.js responde 400.
+EXIT_BAD_PATTERNS = 4
+
+
+class BadPatterns(ValueError):
+    pass
+
 
 # ==========================================
 # 1. OPERADORES ' Y " (fallo de MuPDF 1.28.2)
@@ -1329,9 +1336,24 @@ def text_loss_pages(path, zones_by_page, words_before):
 # ==========================================
 # ACCIONES
 # ==========================================
+def load_patterns(patterns_path):
+    """{categoría: patrón} del JSON de search. BadPatterns si no es un objeto o algún patrón
+    no es una cadena no vacía (una vacía casaría en cada posición sin encontrar nada). Un
+    patrón que no compila sí vale: search lo devuelve como error de su categoría."""
+    try:
+        with open(patterns_path, "r", encoding="utf-8") as f:
+            patterns = json.load(f)
+    except ValueError as e:
+        raise BadPatterns(f"los patrones no son JSON: {e}") from None
+    if not isinstance(patterns, dict):
+        raise BadPatterns("los patrones no son un objeto")
+    if not all(isinstance(p, str) and p for p in patterns.values()):
+        raise BadPatterns("hay un patrón que no es una cadena no vacía")
+    return patterns
+
+
 def search(input_path, patterns_path, results_path):
-    with open(patterns_path, "r", encoding="utf-8") as f:
-        patterns = json.load(f)
+    patterns = load_patterns(patterns_path)
 
     doc = fitz.open(input_path)
     # Se busca sobre el documento aplanado, igual que el que censura apply: así también
@@ -1601,7 +1623,11 @@ def main(argv):
         print("PDF con contraseña de apertura", file=sys.stderr)
         sys.exit(pdf_check.EXIT_ENCRYPTED)
     if action == "search":
-        search(input_path, argv[3], argv[4])
+        try:
+            search(input_path, argv[3], argv[4])
+        except BadPatterns as e:
+            print(f"Patrones no válidos en redact.py: {e}", file=sys.stderr)
+            sys.exit(EXIT_BAD_PATTERNS)
     elif action == "apply":
         output_path = argv[3]
         with open(argv[4], "r", encoding="utf-8") as f:

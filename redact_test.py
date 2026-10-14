@@ -410,5 +410,40 @@ class TamanoDeSalida(unittest.TestCase):
         self.assertIsNone(redact.jpeg_quality(b"no es un jpeg"))
 
 
+class PatronesNoValidos(unittest.TestCase):
+    """search: patterns tiene que ser un objeto y cada patrón una cadena no vacía. Si no, sale
+    con EXIT_BAD_PATTERNS (server.js responde 400), nunca con el 1 de un error inesperado (500).
+    Un patrón vacío casaba en cada posición del texto de cada página sin encontrar nada."""
+
+    def run_search(self, patterns_json):
+        import subprocess
+        import sys
+        src, res, pat = tmp_path(self, "in.pdf"), tmp_path(self, "r.json"), tmp_path(self, "p.json")
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 72), f"Expediente {TERM}")
+        doc.save(src)
+        doc.close()
+        with open(pat, "w", encoding="utf-8") as f:
+            f.write(patterns_json)
+        here = os.path.dirname(os.path.abspath(__file__))
+        return subprocess.run([sys.executable, os.path.join(here, "redact.py"), "search", src, pat, res],
+                              capture_output=True, text=True)
+
+    def test_patrones_no_validos_salen_con_su_codigo(self):
+        for bad in ('[]', '["manzana1"]', '"manzana1"', 'null', '3',
+                    '{"a": 5}', '{"a": null}', '{"a": ["x"]}', '{"a": {}}', '{"a": ""}',
+                    '{"a": "x", "b": ""}'):
+            with self.subTest(patterns=bad):
+                proc = self.run_search(bad)
+                self.assertEqual(proc.returncode, redact.EXIT_BAD_PATTERNS, proc.stderr)
+                self.assertNotIn("Traceback", proc.stderr)
+
+    def test_patrones_validos_siguen_funcionando(self):
+        for good in ('{}', '{"Personalizado": "(?i)manzana1"}', '{"roto": "(", "ok": "manzana1"}'):
+            with self.subTest(patterns=good):
+                proc = self.run_search(good)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

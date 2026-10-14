@@ -90,9 +90,12 @@ function createLimiter({ maxConcurrent, maxQueue, queueTimeoutMs }) {
         return { state: 'running' };
     };
 
-    // Peticiones en cola o ejecutando, y cuántas caben en total: server.js las usa para
-    // rechazar una subida antes de recibirla si ya no habría sitio.
-    const load = () => tickets.size;
+    // Ocupación (huecos ocupados más peticiones en cola) y cuántas caben en total: server.js
+    // las usa para rechazar una subida antes de recibirla si ya no habría sitio. Cuenta huecos
+    // y no peticiones: una grande ocupa dos. Con alguien en cola, los huecos libres no los
+    // puede usar una petición nueva (FIFO estricto), así que cuentan como ocupados. Así load
+    // llega a capacity justo cuando acquire rechazaría con QUEUE_FULL a una de peso 1.
+    const load = () => (waiting.length > 0 ? maxConcurrent : used) + waiting.length;
     const capacity = maxConcurrent + maxQueue;
     // Huecos ocupados (una tarea grande cuenta por dos).
     const slotsInUse = () => used;

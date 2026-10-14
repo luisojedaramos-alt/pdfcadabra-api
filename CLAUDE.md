@@ -224,7 +224,10 @@
   redact.py 52 s tras el corte, ocupando su hueco. Test en `disconnect.test.js`
   (procesos reales que no terminan).
 - Cola llena antes del cuerpo (`admitUpload`, antes de multer en las tres rutas POST): si
-  las subidas en curso más las peticiones en cola o ejecutando (`heavyLimiter.load()`)
+  las subidas en curso más los huecos ocupados y las peticiones en cola (`heavyLimiter.load()`;
+  una grande cuenta por dos huecos y, con alguien en cola, los huecos libres cuentan como
+  ocupados, desde 2026-10-14: antes contaba peticiones y con una grande en marcha admitía una
+  subida de más que recibía el 503 tras subir el archivo entero)
   llegan a `capacity` (HEAVY_MAX_CONCURRENT + HEAVY_MAX_QUEUE, 11 en el servidor), 503
   `QUEUE_FULL` con `Retry-After: 10` y `Connection: close` sin leer el cuerpo. La subida
   deja de contar al entrar en heavyGate (pasa a contar en el limiter) o al cerrarse.

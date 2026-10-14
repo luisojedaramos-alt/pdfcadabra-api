@@ -206,3 +206,34 @@ test('QUEUE_FULL con peso: si no cabe ahora y la cola está llena', async () => 
     r1();
     r2();
 });
+
+test('load cuenta huecos ocupados: llega a capacity justo cuando acquire ya no admitiría', async () => {
+    const limiter = make({ maxConcurrent: 3, maxQueue: 2 });
+    assert.equal(limiter.capacity, 5);
+    const rBig = await limiter.acquire('big', 2);
+    assert.equal(limiter.load(), 2);
+    const rA = await limiter.acquire('a');
+    assert.equal(limiter.load(), 3); // 2 peticiones, 3 huecos
+    const queued = [limiter.acquire('q1'), limiter.acquire('q2')];
+    await tick();
+    assert.equal(limiter.load(), limiter.capacity);
+    await assert.rejects(limiter.acquire('x'), { code: 'QUEUE_FULL' });
+    rBig();
+    rA();
+    (await queued[0])();
+    (await queued[1])();
+    assert.equal(limiter.load(), 0);
+});
+
+test('load con cola: un hueco libre que nadie puede usar (FIFO) cuenta como ocupado', async () => {
+    const limiter = make({ maxConcurrent: 3, maxQueue: 1 });
+    const rA = await limiter.acquire('a');
+    const rB = await limiter.acquire('b');
+    const pBig = limiter.acquire('big', 2); // no cabe: espera, con un hueco libre
+    await tick();
+    assert.equal(limiter.load(), limiter.capacity);
+    await assert.rejects(limiter.acquire('x'), { code: 'QUEUE_FULL' });
+    rA();
+    rB();
+    (await pBig)();
+});

@@ -304,8 +304,9 @@ const abortHeavy = (req) => {
     if (children.length > 0) console.warn(`Cliente desconectado: ${children.length} proceso(s) terminado(s).`);
 };
 
-// Va ANTES de multer: si las subidas en curso más las peticiones en cola o ejecutando ya
-// llenan la cola, responde 503 QUEUE_FULL sin leer el cuerpo (Connection: close). Antes el
+// Va ANTES de multer: si las subidas en curso más los huecos ocupados y las peticiones en
+// cola (heavyLimiter.load(): una grande cuenta por dos huecos) ya llenan la cola, responde
+// 503 QUEUE_FULL sin leer el cuerpo (Connection: close). Antes el
 // 503 llegaba tras recibir el archivo entero (45 s y 90 MB por cada uno en las pruebas de
 // carga) y con unas 35 subidas de 90 MB a la vez se llenaba /tmp (ENOSPC, 500 genérico).
 // La subida deja de contar al llegar a heavyGate (pasa a contar en el limiter) o al cerrarse.

@@ -32,9 +32,10 @@
   (ver Límites por plan): cola 180 s, Comprimir 180 s en total (+30 s de
   verificación), Anonimizar 240 s por proceso. Health check de Docker a `/health`
   cada 30 s.
-- Comprobado en el servidor el 2026-10-08 (`docker inspect` del contenedor,
-  revisión 5ba1c90). Revisión actual en producción: a9f24d1 (desplegada el
-  2026-10-14).
+- Comprobado en el servidor el 2026-10-15 (`docker inspect` del contenedor,
+  revisión c4e54da). Revisión actual en producción: c4e54da (desplegada el
+  2026-10-15, auditoría externa: lote B, H-06 y restauración fallida). Vuelta atrás:
+  imagen `pdfcadabra-api:rollback-a9f24d1` y `/opt/pdfcadabra/api.old` (a9f24d1).
 
 # Health check
 

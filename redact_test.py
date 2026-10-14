@@ -410,6 +410,38 @@ class TamanoDeSalida(unittest.TestCase):
         self.assertIsNone(redact.jpeg_quality(b"no es un jpeg"))
 
 
+class BusquedaConRepeticiones(unittest.TestCase):
+    """Un valor que se repite en la página se busca con search_for una sola vez (devuelve todas
+    sus apariciones). Antes, una vez por repetición: k llamadas y k² hallazgos que luego se
+    deduplicaban (30 páginas con 80 repeticiones cada una: 17,9 s en vez de 0,3 s)."""
+
+    def test_una_llamada_por_valor_y_cada_aparicion_con_su_contexto(self):
+        import json
+        from unittest import mock
+        src, res, pat = tmp_path(self, "in.pdf"), tmp_path(self, "r.json"), tmp_path(self, "p.json")
+        doc = fitz.open()
+        page = doc.new_page()
+        for i, who in enumerate(("Ana", "Luis", "Eva")):
+            page.insert_text((72, 72 + 20 * i), f"DNI 12345678Z de {who}")
+        page.insert_text((72, 140), "y otro 87654321X")
+        doc.save(src)
+        doc.close()
+        with open(pat, "w", encoding="utf-8") as f:
+            json.dump({"dni": r"\b\d{8}[A-Z]\b", "Personalizado": "(?i)12345678z"}, f)
+        real = fitz.Page.search_for
+        with mock.patch.object(fitz.Page, "search_for", autospec=True, side_effect=real) as spy:
+            redact.search(src, pat, res)
+        values = sorted(c.args[1] for c in spy.call_args_list)
+        spy.reset_mock()  # suelta las páginas (y el PDF abierto: en Windows no se podría borrar)
+        self.assertEqual(values, ["12345678Z", "87654321X"])
+        with open(res, encoding="utf-8") as f:
+            results = json.load(f)["results"]
+        self.assertEqual([(r["text"], r["category"]) for r in results], [("12345678Z", "dni")] * 3 + [("87654321X", "dni")])
+        for r, who in zip(results, ("Ana", "Luis", "Eva")):
+            self.assertIn(f"12345678Z de {who}", r["context"])
+        self.assertEqual(len({tuple(r["rect"]) for r in results}), 4)
+
+
 class PatronesNoValidos(unittest.TestCase):
     """search: patterns tiene que ser un objeto y cada patrón una cadena no vacía. Si no, sale
     con EXIT_BAD_PATTERNS (server.js responde 400), nunca con el 1 de un error inesperado (500).

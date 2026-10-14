@@ -1401,13 +1401,18 @@ def search(input_path, patterns_path, results_path):
         p_height = page.rect.height
 
         raw_rects = []
+        # Valores ya buscados en esta página: search_for(val) devuelve todas sus apariciones,
+        # así que repetirlo por cada match del mismo valor solo daba copias que la
+        # deduplicación de abajo descartaba (con k repeticiones, k llamadas y k² hallazgos).
+        # Se marca tras terminar: si search_for falla, otra categoría lo vuelve a intentar.
+        searched = set()
 
         for category, compiled_pattern in compiled_patterns.items():
             try:
                 # Encontrar matches y obtener las posiciones reales en el texto
                 for match in compiled_pattern.finditer(text):
                     val = match.group().strip()
-                    if not val:
+                    if not val or val in searched:
                         continue
 
                     # Avanzamos la búsqueda de contexto usando text.find con offset
@@ -1436,6 +1441,7 @@ def search(input_path, patterns_path, results_path):
                             "category": category,
                             "rect": [area.x0, area.y0, area.x1, area.y1]
                         })
+                    searched.add(val)
             except Exception:
                 pass
 

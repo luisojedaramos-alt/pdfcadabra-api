@@ -276,7 +276,13 @@
   queda de la ventana (redondeado arriba, mínimo 1) en el 429 por ventana agotada. Test en
   `retry-after.test.js`.
 - Orden en cada ruta POST: `requireOrigin` (403) → `checkUploadSize` (413) →
-  `limitPerClient` (429) → `admitUpload` (503) → multer → `heavyGate` (cola).
+  `limitPerClient` (429) → `admitUpload` (503) → multer → (Anonimizar) `requirePatterns` /
+  `requireItems` (400) → `heavyGate` (cola).
+- Campos de Anonimizar (`requireJsonField`, desde 2026-10-14): sin archivo, o si `patterns`
+  (search) no es un objeto JSON o `items` (apply) no es un array JSON, 400 al momento, sin
+  pasar por la cola, y se borra la subida. Antes se comprobaba con el hueco ya concedido (la
+  petición esperaba en cola para recibir el 400) y un JSON de otro tipo acababa en 500 en
+  redact.py. Test en `redact-fields.test.js`.
 
 # Límites por plan (rama feat/limites-50-100, 2026-10-13)
 

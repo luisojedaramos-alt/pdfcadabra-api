@@ -327,6 +327,29 @@ const admitUpload = (req, res, next) => {
     next();
 };
 
+// Va DESPUÉS de multer y ANTES de heavyGate: sin archivo, o si el campo `name` no es un JSON
+// de la forma que espera redact.py (`isValid`), 400 al momento y se borra la subida. Antes
+// se comprobaba ya con el hueco concedido: la petición esperaba en cola (hasta 180 s) para
+// recibir el 400, y un JSON mal formado o de otro tipo llegaba a redact.py y acababa en 500.
+// Un campo repetido llega como array (no como cadena) y tampoco vale.
+const requireJsonField = (name, isValid, message) => (req, res, next) => {
+    const raw = req.body && req.body[name];
+    let ok = !!req.file && typeof raw === 'string';
+    if (ok) {
+        try {
+            ok = isValid(JSON.parse(raw));
+        } catch (e) {
+            ok = false;
+        }
+    }
+    if (ok) return next();
+    secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
+    return res.status(400).json({ error: message });
+};
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const requirePatterns = requireJsonField('patterns', isPlainObject, 'Falta el archivo o los patrones.');
+const requireItems = requireJsonField('items', Array.isArray, 'Falta el archivo o los hallazgos.');
+
 // Límite por cliente (IP), antes de multer y de la cola: IP_MAX_CONCURRENT peticiones a la
 // vez (contando la subida) e IP_MAX_PER_WINDOW cada IP_WINDOW_MS; si no, 429 RATE_LIMITED
 // con Retry-After y sin leer el cuerpo. Así una sola IP no ocupa toda la cola (en las
@@ -411,12 +434,7 @@ app.get('/v1/queue/status/:id', (req, res) => {
 // ==========================================
 // MÓDULO 1: CENSURA - BÚSQUEDA
 // ==========================================
-app.post('/v1/redact/search', requireOrigin, checkUploadSize(FIELDS), limitPerClient, admitUpload, uploadFile(FIELDS), heavyGate, (req, res) => {
-    if (!req.file || !req.body.patterns) {
-        secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
-        return res.status(400).json({ error: 'Falta el archivo o los patrones.' });
-    }
-
+app.post('/v1/redact/search', requireOrigin, checkUploadSize(FIELDS), limitPerClient, admitUpload, uploadFile(FIELDS), requirePatterns, heavyGate, (req, res) => {
     const inputPath = req.file.path;
     const baseId = uuidv4(); // Evita colisiones de archivos temporales entre usuarios
     const patternsPath = path.join(UPLOAD_DIR, `patterns_${baseId}.json`);
@@ -424,8 +442,7 @@ app.post('/v1/redact/search', requireOrigin, checkUploadSize(FIELDS), limitPerCl
     cleanupOnClose(req, res, () => secureCleanup([inputPath, patternsPath, resultsPath]));
 
     try {
-        const patternsData = typeof req.body.patterns === 'string' ? req.body.patterns : JSON.stringify(req.body.patterns);
-        fs.writeFileSync(patternsPath, patternsData, 'utf-8');
+        fs.writeFileSync(patternsPath, req.body.patterns, 'utf-8'); // cadena JSON ya validada (requirePatterns)
 
         runHeavy(req, 'python3', ['redact.py', 'search', inputPath, patternsPath, resultsPath], (error, stdout, stderr) => {
             if (error) {
@@ -453,12 +470,7 @@ app.post('/v1/redact/search', requireOrigin, checkUploadSize(FIELDS), limitPerCl
 // ==========================================
 // MÓDULO 2: CENSURA - DESTRUCCIÓN Y APLICACIÓN
 // ==========================================
-app.post('/v1/redact/apply', requireOrigin, checkUploadSize(APPLY_FIELDS), limitPerClient, admitUpload, uploadFile(APPLY_FIELDS), heavyGate, (req, res) => {
-    if (!req.file || !req.body.items) {
-        secureCleanup([req.file && req.file.path]); // multer ya guardó la subida: no dejarla en /tmp
-        return res.status(400).json({ error: 'Falta el archivo o los hallazgos.' });
-    }
-
+app.post('/v1/redact/apply', requireOrigin, checkUploadSize(APPLY_FIELDS), limitPerClient, admitUpload, uploadFile(APPLY_FIELDS), requireItems, heavyGate, (req, res) => {
     const inputPath = req.file.path;
     const baseId = uuidv4();
     const itemsPath = path.join(UPLOAD_DIR, `items_${baseId}.json`);
@@ -469,8 +481,7 @@ app.post('/v1/redact/apply', requireOrigin, checkUploadSize(APPLY_FIELDS), limit
     cleanupOnClose(req, res, () => secureCleanup([inputPath, itemsPath, outputPath, resultsPath, ...workCopies]));
 
     try {
-        const itemsData = typeof req.body.items === 'string' ? req.body.items : JSON.stringify(req.body.items);
-        fs.writeFileSync(itemsPath, itemsData, 'utf-8');
+        fs.writeFileSync(itemsPath, req.body.items, 'utf-8'); // cadena JSON ya validada (requireItems)
 
         // NUEVO: Se añade el quinto argumento (resultsPath) al comando Python
         runHeavy(req, 'python3', ['redact.py', 'apply', inputPath, outputPath, itemsPath, resultsPath], (error, stdout, stderr) => {

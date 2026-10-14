@@ -71,7 +71,7 @@ async function waitFor(check, what, ms = 5000) {
 
 const ROUTES = {
     '/v1/compress': { stage: 'gs', fields: { level: 'extreme' } },
-    '/v1/redact/search': { stage: 'redact.py', fields: { patterns: JSON.stringify([{ type: 'text', value: 'x' }]) } },
+    '/v1/redact/search': { stage: 'redact.py', fields: { patterns: JSON.stringify({ texto: 'x' }) } },
     '/v1/redact/apply': { stage: 'redact.py', fields: { items: JSON.stringify([{ id: 'a', page: 0, rect: [0, 0, 10, 10] }]) } }
 };
 

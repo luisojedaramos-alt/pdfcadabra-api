@@ -687,45 +687,67 @@ def _string_bytes(obj):
 # No se sigue hacia el padre ni hacia la página: se saldría del objeto que se examina.
 _UPWARD_KEYS = {"Parent", "P"}
 
-# Niveles de arrays, diccionarios y referencias que recorre _walk_strings. Ningún PDF normal se
-# acerca (las acciones, capas o /PieceInfo tienen pocos); una cadena de miles de referencias
-# agotaba la pila de Python (RecursionError, 500). Con anidamiento directo, MuPDF ya no lee
-# un objeto de más de unos 256 niveles (ni lo escribe en la salida).
-MAX_NESTING = 200
+# Niveles de arrays, diccionarios y referencias que recorren _walk_strings y
+# _clean_named_dests. Los dos usan una pila propia: la profundidad no gasta la de Python (antes,
+# recursivos, una cadena de unas 1.000 referencias daba RecursionError y 500) y con `seen` cada
+# objeto se visita una vez, así que el recorrido siempre acaba. El tope solo es una red de
+# seguridad que falla cerrado (422), muy por encima de cualquier PDF real: la cadena más larga
+# que puede tener uno normal es una lista enlazada (las cuentas /N de un artículo, a las que
+# llega un marcador que lo abre), de una o pocas por página. Con anidamiento directo, MuPDF ya
+# no lee un objeto de más de unos 256 niveles (ni lo escribe en la salida).
+MAX_NESTING = 10_000
 
 
 class NestingTooDeep(Exception):
     """Un objeto más anidado que MAX_NESTING: no se ha podido recorrer entero."""
 
 
-def _walk_strings(obj, pages, seen, depth=0):
-    """(contenedor, clave o índice, cadena) de cada cadena de obj y de lo que referencia,
-    salvo páginas y Parent/P. `seen`: números de objeto ya visitados. NestingTooDeep si pasa
-    de MAX_NESTING niveles: lo que haya más abajo no se puede dar por limpio."""
+def _walk_frame(obj, pages, seen, depth):
+    """Marco de la pila de _walk_strings para obj ([obj, siguiente índice, longitud, nivel,
+    es array]), o None si no hay nada que recorrer (página, ya visitado, ni array ni dict)."""
     if depth > MAX_NESTING:
         raise NestingTooDeep()
     if _m.pdf_is_indirect(obj):
         num = _m.pdf_to_num(obj)
         if num in pages or num in seen:
-            return
+            return None
         seen.add(num)
     if _m.pdf_is_array(obj):
-        for i in range(_m.pdf_array_len(obj)):
-            item = _m.pdf_array_get(obj, i)
-            if _m.pdf_is_string(item):
-                yield obj, i, item
-            else:
-                yield from _walk_strings(item, pages, seen, depth + 1)
-    elif _m.pdf_is_dict(obj):
-        for i in range(_m.pdf_dict_len(obj)):
-            key = _m.pdf_dict_get_key(obj, i)
+        return [obj, 0, _m.pdf_array_len(obj), depth, True]
+    if _m.pdf_is_dict(obj):
+        return [obj, 0, _m.pdf_dict_len(obj), depth, False]
+    return None
+
+
+def _walk_strings(obj, pages, seen):
+    """(contenedor, clave o índice, cadena) de cada cadena de obj y de lo que referencia,
+    salvo páginas y Parent/P, en profundidad y en orden. `seen`: números de objeto ya visitados.
+    NestingTooDeep si pasa de MAX_NESTING niveles: lo que haya más abajo no se puede dar por
+    limpio."""
+    stack = []
+    frame = _walk_frame(obj, pages, seen, 0)
+    if frame:
+        stack.append(frame)
+    while stack:
+        frame = stack[-1]
+        container, i, length, depth, is_array = frame
+        if i >= length:
+            stack.pop()
+            continue
+        frame[1] = i + 1
+        if is_array:
+            key, val = i, _m.pdf_array_get(container, i)
+        else:
+            key = _m.pdf_dict_get_key(container, i)
             if _m.pdf_to_name(key) in _UPWARD_KEYS:
                 continue
-            val = _m.pdf_dict_get_val(obj, i)
-            if _m.pdf_is_string(val):
-                yield obj, key, val
-            else:
-                yield from _walk_strings(val, pages, seen, depth + 1)
+            val = _m.pdf_dict_get_val(container, i)
+        if _m.pdf_is_string(val):
+            yield container, key, val
+            continue
+        child = _walk_frame(val, pages, seen, depth + 1)
+        if child:
+            stack.append(child)
 
 
 def _has_term(obj, found, pages):
@@ -804,15 +826,29 @@ def _clean_named_dests(doc, found, pages):
         return 0
     kept, removed, seen = [], 0, set()
 
-    def walk(node):
-        nonlocal removed
+    def enter(node, depth):
+        """Marco [nodo, siguiente hijo, nº de hijos, nivel], o None si ya se visitó."""
+        if depth > MAX_NESTING:
+            raise NestingTooDeep()
         if _m.pdf_is_indirect(node):
             if _m.pdf_to_num(node) in seen:
-                return
+                return None
             seen.add(_m.pdf_to_num(node))
-        kids = _m.pdf_dict_gets(node, "Kids")
-        for i in range(_m.pdf_array_len(kids)):
-            walk(_m.pdf_array_get(kids, i))
+        return [node, 0, _m.pdf_array_len(_m.pdf_dict_gets(node, "Kids")), depth]
+
+    # En profundidad con pila propia (como _walk_strings): primero los hijos de cada nodo, en
+    # orden, y después sus propios /Names, así que `kept` sale en el orden del árbol.
+    stack = [enter(dests, 0)]
+    while stack:
+        frame = stack[-1]
+        node, i, nkids, depth = frame
+        if i < nkids:
+            frame[1] = i + 1
+            child = enter(_m.pdf_array_get(_m.pdf_dict_gets(node, "Kids"), i), depth + 1)
+            if child:
+                stack.append(child)
+            continue
+        stack.pop()
         pairs = _m.pdf_dict_gets(node, "Names")
         for i in range(0, _m.pdf_array_len(pairs) - 1, 2):
             key, val = _m.pdf_array_get(pairs, i), _m.pdf_array_get(pairs, i + 1)
@@ -820,8 +856,6 @@ def _clean_named_dests(doc, found, pages):
                 removed += 1
             else:
                 kept.append((key, val))
-
-    walk(dests)
     if removed:
         pdf = fitz._as_pdf_document(doc)
         flat = _m.pdf_new_array(pdf, 2 * len(kept))

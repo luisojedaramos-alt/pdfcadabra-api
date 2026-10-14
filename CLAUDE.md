@@ -140,13 +140,18 @@
   `_content_bboxlog` (solo el contenido: `get_bboxlog` incluye la anotación de censura ya
   puesta). Solo rectángulos lisos: una firma o un sello rellenos que tapan texto se quitan.
 - Anidamiento (desde 2026-10-14): `_walk_strings` (la usan `clean_layer_names` y
-  `clean_structures`) no pasa de `MAX_NESTING` (200) niveles de arrays, diccionarios y
-  referencias: si un objeto llega más hondo, `NestingTooDeep` y `apply` devuelve
-  `verified: False` con `leaks: ["nesting_depth"]` (422, sin salida), haya o no un término
-  abajo: lo que no se ha recorrido no se da por limpio. Antes, una cadena de unas 1.000
-  referencias agotaba la pila (RecursionError, 500). El anidamiento directo de más de unos 256
-  niveles ya lo rechaza MuPDF al leer el objeto, y entonces tampoco lo escribe en la salida
-  (comprobado). Test en `redact_leaks_test.py` (`AnidamientoProfundo`).
+  `clean_structures`) y `_clean_named_dests` recorren con una pila propia, no recursivos (antes,
+  una cadena de unas 1.000 referencias o un árbol de nombres de 1.500 niveles daban
+  RecursionError, 500), con `seen` para los ciclos. Tope de seguridad `MAX_NESTING` (10.000
+  niveles de arrays, diccionarios y referencias): si se pasa, `NestingTooDeep` y `apply`
+  devuelve `verified: False` con `leaks: ["nesting_depth"]` (422, sin salida), haya o no un
+  término abajo: lo que no se ha recorrido no se da por limpio. Hubo un día un tope de 200,
+  pero un marcador que abre un artículo (/S /Thread) de 300 cuentas ya lo pasaba (cada cuenta
+  enlaza la siguiente con /N). Los índices de marcadores, el árbol de estructura y los títulos
+  no pasan por estos recorridos. 10.000 niveles se recorren en unos 35 ms. El anidamiento
+  directo de más de unos 256 niveles ya lo rechaza MuPDF al leer el objeto, y entonces
+  tampoco lo escribe en la salida (comprobado). Tests en `redact_leaks_test.py`
+  (`AnidamientoProfundo`, `EstructurasLargasNormales`).
 - Adjuntos por `/AF` (PDF/A-3, Factur-X): tras `scrub`, `remove_associated_files` quita la
   clave `/AF` de todos los objetos, igual que `scrub(embedded_files=True)` vacía el árbol de
   nombres; el Filespec y su flujo quedan huérfanos y `save(garbage=4)` los elimina.

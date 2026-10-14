@@ -932,7 +932,7 @@ class AnidamientoProfundo(Base):
     """Cadenas de referencias más largas que MAX_NESTING (p. ej. /PieceInfo -> [1 0 R] ->
     [2 0 R] -> ... -> (término)): _walk_strings no las recorre enteras, así que no puede
     limpiarlas. La censura no se da por verificada (422) y no hay salida; nunca se salta en
-    silencio. Antes, con unos 1.000 niveles, RecursionError: redact.py salía con 1 (500)."""
+    silencio. Con el recorrido recursivo, unos 1.000 niveles daban RecursionError (500)."""
 
     def _chain(self, depth, term=TERM):
         doc = base_doc()
@@ -943,7 +943,7 @@ class AnidamientoProfundo(Base):
         return self.apply(self.save(doc))
 
     def test_termino_mas_hondo_que_el_limite_no_se_entrega(self):
-        for depth in (redact.MAX_NESTING + 50, 3000):
+        for depth in (redact.MAX_NESTING + 50,):
             with self.subTest(depth=depth):
                 report, out = self._chain(depth)
                 self.assertBlocked(report, out)
@@ -958,6 +958,76 @@ class AnidamientoProfundo(Base):
 
     def test_dentro_del_limite_se_limpia_y_se_entrega(self):
         self.assertDeliveredClean(*self._chain(redact.MAX_NESTING - 10))
+
+    def test_mas_hondo_que_la_pila_de_python_se_limpia_y_se_entrega(self):
+        """3.000 niveles: con el recorrido recursivo, RecursionError (500); con el de pila
+        propia, dentro del tope: se limpia y se entrega."""
+        self.assertDeliveredClean(*self._chain(3000))
+
+
+class EstructurasLargasNormales(Base):
+    """Listas enlazadas y árboles grandes que tiene un expediente normal (índices de cientos de
+    marcadores, artículos, PDF etiquetados, árboles de nombres): nunca un 422 por anidamiento.
+
+    2a-2c no pasan por _walk_strings (los títulos los mira remove_outline_terms con get_toc y
+    /Alt y /ActualText se leen objeto a objeto): pasaban ya con MAX_NESTING = 200. Las que sí
+    lo recorren, y fallaban con 200: un marcador que abre un artículo (/S /Thread: hilo -> primera
+    cuenta -> /N -> /N...) de 300 cuentas (422 nesting_depth), y un árbol de /Names /Dests
+    degenerado de 1.500 niveles (RecursionError en _clean_named_dests: 500)."""
+
+    def test_2a_mil_marcadores_planos_con_el_termino_en_el_ultimo(self):
+        doc = base_doc()
+        doc.set_toc([[1, f"Documento {i}", 1] for i in range(999)] + [[1, f"Anexo {TERM}", 1]])
+        report, out = self.apply(self.save(doc))
+        self.assertDeliveredClean(report, out)
+        self.assertEqual(len(fitz.open(out).get_toc()), 999)
+
+    def test_2b_quinientos_marcadores_anidados_a_diez_niveles(self):
+        doc = base_doc()
+        doc.set_toc([[i % 10 + 1, f"Sección {i}" if i < 499 else f"Sección {TERM}", 1] for i in range(500)])
+        report, out = self.apply(self.save(doc))
+        self.assertDeliveredClean(report, out)
+        self.assertEqual(len(fitz.open(out).get_toc()), 499)
+
+    def test_2c_etiquetado_de_300_paginas_con_el_termino_en_alt_y_actualtext(self):
+        doc = base_doc(pages=300)
+        root, docel = new_object(doc, "<<>>"), new_object(doc, "<<>>")
+        kids = []
+        for page in doc:
+            text = f"/Alt(Foto de {TERM})/ActualText({TERM})" if page.number == 299 else f"/Alt(Figura {page.number})"
+            kids.append(new_object(doc, f"<</Type/StructElem/S/Figure/P {docel} 0 R/Pg {page.xref} 0 R{text}>>"))
+        doc.update_object(docel, f"<</Type/StructElem/S/Document/P {root} 0 R/K[{' '.join(f'{k} 0 R' for k in kids)}]>>")
+        doc.update_object(root, f"<</Type/StructTreeRoot/K {docel} 0 R>>")
+        doc.xref_set_key(doc.pdf_catalog(), "StructTreeRoot", f"{root} 0 R")
+        doc.xref_set_key(doc.pdf_catalog(), "MarkInfo", "<</Marked true>>")
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_marcador_que_abre_un_articulo_de_300_cuentas(self):
+        doc = base_doc(pages=300)
+        doc.set_toc([[1, "Leer el artículo", 1], [1, "Anexo", 1]])
+        thread = new_object(doc, "<<>>")
+        beads = [new_object(doc, "<<>>") for _ in range(300)]
+        for i, bead in enumerate(beads):
+            doc.update_object(bead, f"<</T {thread} 0 R/P {doc[i].xref} 0 R/R[50 50 500 700]"
+                                    f"/N {beads[(i + 1) % 300]} 0 R/V {beads[i - 1]} 0 R>>")
+            doc.xref_set_key(doc[i].xref, "B", f"[{bead} 0 R]")
+        doc.update_object(thread, f"<</Type/Thread/I<</Title(Crónica)>>/F {beads[0]} 0 R>>")
+        doc.xref_set_key(doc.pdf_catalog(), "Threads", f"[{thread} 0 R]")
+        item_xref = doc.get_toc(simple=False)[0][3]["xref"]
+        doc.xref_set_key(item_xref, "A", f"<</S/Thread/D {thread} 0 R/B {beads[0]} 0 R>>")
+        doc.xref_set_key(item_xref, "Dest", "null")
+        self.assertDeliveredClean(*self.apply(self.save(doc)))
+
+    def test_arbol_de_nombres_degenerado_de_1500_niveles(self):
+        doc = base_doc()
+        dest = new_object(doc, f"[{doc[0].xref} 0 R /XYZ 0 0 0]")
+        node = new_object(doc, f"<</Limits[(a)(z)]/Names[(Expediente {TERM}) {dest} 0 R (otro) {dest} 0 R]>>")
+        for _ in range(1499):
+            node = new_object(doc, f"<</Limits[(a)(z)]/Kids[{node} 0 R]>>")
+        doc.xref_set_key(doc.pdf_catalog(), "Names", f"<</Dests {node} 0 R>>")
+        report, out = self.apply(self.save(doc))
+        self.assertDeliveredClean(report, out)
+        self.assertIn("otro", fitz.open(out).resolve_names())
 
 
 if __name__ == "__main__":

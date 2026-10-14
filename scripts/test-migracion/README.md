@@ -1,8 +1,10 @@
 # test-migracion
 
 Prueba de la rama `chore/node-trixie` (imagen `node:24-trixie-slim`) en un servicio
-temporal de Render, comparada con producción (`node:20-bookworm-slim`). Solo curl:
-el CORS únicamente acepta pdfcadabra.com, pero las peticiones sin `Origin` pasan.
+temporal de Render, comparada con producción (`node:20-bookworm-slim`). Solo curl.
+La API exige en los POST un `Origin` permitido (sin él, 403 `ORIGIN_NOT_ALLOWED`):
+`run.sh` lo pone en todas las peticiones, con la variable `ORIGIN` (por defecto
+`https://pdfcadabra.com`; p. ej. `ORIGIN=https://www.pdfcadabra.com bash ...`).
 
 ## 1. Servicio temporal en Render
 

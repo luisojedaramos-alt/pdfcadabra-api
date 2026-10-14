@@ -927,5 +927,38 @@ class VectorTests(Base):
         pix = self._render(out, fitz.Rect(240, 85, 360, 110))
         self.assertEqual({pix.pixel(x, y) for x in range(pix.width) for y in range(pix.height)}, {(0, 0, 0)})
 
+
+class AnidamientoProfundo(Base):
+    """Cadenas de referencias más largas que MAX_NESTING (p. ej. /PieceInfo -> [1 0 R] ->
+    [2 0 R] -> ... -> (término)): _walk_strings no las recorre enteras, así que no puede
+    limpiarlas. La censura no se da por verificada (422) y no hay salida; nunca se salta en
+    silencio. Antes, con unos 1.000 niveles, RecursionError: redact.py salía con 1 (500)."""
+
+    def _chain(self, depth, term=TERM):
+        doc = base_doc()
+        last = new_object(doc, f"[({term})]")
+        for _ in range(depth - 1):
+            last = new_object(doc, f"[{last} 0 R]")
+        doc.xref_set_key(doc[0].xref, "PieceInfo", f"<</App {last} 0 R>>")
+        return self.apply(self.save(doc))
+
+    def test_termino_mas_hondo_que_el_limite_no_se_entrega(self):
+        for depth in (redact.MAX_NESTING + 50, 3000):
+            with self.subTest(depth=depth):
+                report, out = self._chain(depth)
+                self.assertBlocked(report, out)
+                self.assertEqual(report["leaks"], ["nesting_depth"])
+                self.assertFalse(os.path.exists(out))
+
+    def test_sin_termino_mas_hondo_que_el_limite_tampoco(self):
+        """No se sabe qué hay más abajo sin recorrerlo: falla igual, aunque no haya término."""
+        report, out = self._chain(redact.MAX_NESTING + 50, term="nada que ver")
+        self.assertBlocked(report, out)
+        self.assertEqual(report["leaks"], ["nesting_depth"])
+
+    def test_dentro_del_limite_se_limpia_y_se_entrega(self):
+        self.assertDeliveredClean(*self._chain(redact.MAX_NESTING - 10))
+
+
 if __name__ == "__main__":
     unittest.main()

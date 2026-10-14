@@ -19,6 +19,10 @@ import pymupdf
 
 import lossless_images
 
+# Una imagen protegida que referencia una cadena de objetos demasiado larga para copiarla
+# (lossless_images.NestingTooDeep): server.js devuelve el original sin tocar.
+EXIT_TOO_DEEP = 4
+
 
 def main(input_path, output_path, originals_path=None):
     doc = pymupdf.open(input_path)
@@ -60,4 +64,8 @@ if __name__ == "__main__":
     if len(args) != 2:
         print("Uso: python3 jpeg_flate.py <entrada.pdf> <salida.pdf> [--originals <original.pdf>]", file=sys.stderr)
         sys.exit(2)
-    main(args[0], args[1], originals)
+    try:
+        main(args[0], args[1], originals)
+    except lossless_images.NestingTooDeep as e:
+        print(f"No se pueden restaurar las imágenes protegidas: {e}", file=sys.stderr)
+        sys.exit(EXIT_TOO_DEEP)

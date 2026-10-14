@@ -138,6 +138,14 @@
   así tape también lo que se le dibujaba encima. El orden de dibujo sale de
   `_content_bboxlog` (solo el contenido: `get_bboxlog` incluye la anotación de censura ya
   puesta). Solo rectángulos lisos: una firma o un sello rellenos que tapan texto se quitan.
+- Anidamiento (desde 2026-10-14): `_walk_strings` (la usan `clean_layer_names` y
+  `clean_structures`) no pasa de `MAX_NESTING` (200) niveles de arrays, diccionarios y
+  referencias: si un objeto llega más hondo, `NestingTooDeep` y `apply` devuelve
+  `verified: False` con `leaks: ["nesting_depth"]` (422, sin salida), haya o no un término
+  abajo: lo que no se ha recorrido no se da por limpio. Antes, una cadena de unas 1.000
+  referencias agotaba la pila (RecursionError, 500). El anidamiento directo de más de unos 256
+  niveles ya lo rechaza MuPDF al leer el objeto, y entonces tampoco lo escribe en la salida
+  (comprobado). Test en `redact_leaks_test.py` (`AnidamientoProfundo`).
 - Adjuntos por `/AF` (PDF/A-3, Factur-X): tras `scrub`, `remove_associated_files` quita la
   clave `/AF` de todos los objetos, igual que `scrub(embedded_files=True)` vacía el árbol de
   nombres; el Filespec y su flujo quedan huérfanos y `save(garbage=4)` los elimina.
@@ -179,6 +187,11 @@
   menos) y falla si queda algún marcador, también dentro de un contenido. Por eso gs va con
   `-dMaxInlineImageSize=0` (si no, mete los marcadores en el contenido) y sin reducir B/N.
   Con marcadores, la salida de gs nunca se envía sin restaurar: si el tope se agota antes, 504.
+- Anidamiento (desde 2026-10-14): al restaurar, `_copy` no sigue más de `MAX_NESTING` (200)
+  referencias desde la imagen original: si hace falta más, `NestingTooDeep`, jpeg_flate.py sale
+  con `EXIT_TOO_DEEP` (4) y `/v1/compress` devuelve el original sin tocar (200,
+  `already-optimized`). Antes, hacia los 330 niveles, RecursionError y 500. Tests en
+  `lossless_images_test.py` (`AnidamientoProfundo`) y `pdf-encrypted.test.js`.
 - Decisión de Luis (2026-10-03): la regla se aplica completa, también a las máscaras de texto
   de página completa de los escaneos (ImageMask de 1 bit), aunque pesen más. Motivo: los
   escaneos judiciales llevan el código CSV (barras o QR) dentro de esa misma imagen de página,

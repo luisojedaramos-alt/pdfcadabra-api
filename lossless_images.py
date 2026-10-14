@@ -39,8 +39,18 @@ MARK_W, MARK_H = 64, 2
 LOSSY_FILTERS = ("DCTDecode", "JPXDecode")
 
 
+# Niveles de referencias que sigue _copy al copiar una imagen original y lo que referencia
+# (espacio de color, perfil ICC, máscara...: pocos). Una cadena de cientos agotaba la pila de
+# Python (RecursionError hacia los 330 niveles, y /v1/compress respondía 500).
+MAX_NESTING = 200
+
+
 class RestoreError(Exception):
     pass
+
+
+class NestingTooDeep(RestoreError):
+    """La imagen original referencia una cadena de más de MAX_NESTING objetos: no se copia."""
 
 
 def _key(doc, xref, name):
@@ -161,23 +171,26 @@ def protect(doc):
 _TOKEN = re.compile(rb"\((?:\\.|[^\\)])*\)|<(?!<)[0-9A-Fa-f\s]*>|(\d+) 0 R")
 
 
-def _copy(src, dst, xref, memo):
-    """Copia el objeto `xref` de `src` (y todo lo que referencia) a `dst`. Devuelve el xref nuevo."""
+def _copy(src, dst, xref, memo, depth):
+    """Copia el objeto `xref` de `src` (y todo lo que referencia) a `dst`. Devuelve el xref nuevo.
+    NestingTooDeep si hay que seguir más de MAX_NESTING referencias: nunca se copia a medias."""
     if xref not in memo:
+        if depth > MAX_NESTING:
+            raise NestingTooDeep(f"más de {MAX_NESTING} referencias anidadas")
         memo[xref] = dst.get_new_xref()
         dst.update_object(memo[xref], "null")
-        _put(src, dst, xref, memo[xref], memo)
+        _put(src, dst, xref, memo[xref], memo, depth)
     return memo[xref]
 
 
-def _put(src, dst, xref, target, memo):
+def _put(src, dst, xref, target, memo, depth=0):
     """Escribe en `dst[target]` el objeto `src[xref]`, con el flujo comprimido tal cual."""
     obj = src.xref_object(xref, compressed=True).encode("latin-1")
 
     def repl(m):
         if m.group(1) is None:
             return m.group(0)
-        return b"%d 0 R" % _copy(src, dst, int(m.group(1)), memo)
+        return b"%d 0 R" % _copy(src, dst, int(m.group(1)), memo, depth + 1)
 
     text = _TOKEN.sub(repl, obj).decode("latin-1")
     if src.xref_is_stream(xref):

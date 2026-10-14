@@ -53,6 +53,21 @@ make("plain.pdf")
 make("a.pdf", user_pw="qa1234", owner_pw="qa1234-owner")
 make("b.pdf", user_pw="", owner_pw="qa1234-owner")
 make("una.pdf", pages=1, image=False)
+# Como plain.pdf, con una imagen de 1 bit (protegida) que apunta a una cadena de 3000
+# referencias: más que lossless_images.MAX_NESTING.
+doc = pymupdf.open(os.path.join(d, "plain.pdf"))
+doc[0].insert_image(pymupdf.Rect(60, 520, 160, 620), pixmap=pymupdf.Pixmap(pymupdf.csGRAY, 8, 1, b"\\x00" * 8, 0))
+img = max(x for x in range(1, doc.xref_length()) if doc.xref_get_key(x, "Subtype") == ("name", "/Image"))
+doc.update_object(img, "<</Type/XObject/Subtype/Image/Width 8/Height 1/ColorSpace/DeviceGray/BitsPerComponent 1>>")
+doc.update_stream(img, b"\\x55", compress=False)
+last = doc.get_new_xref()
+doc.update_object(last, "(fondo)")
+for _ in range(2999):
+    x = doc.get_new_xref()
+    doc.update_object(x, f"[{last} 0 R]")
+    last = x
+doc.xref_set_key(img, "Foo", f"{last} 0 R")
+doc.save(os.path.join(d, "hondo.pdf"))
 `;
 if (!skip) childProcess.execFileSync(PYTHON, ['-c', SAMPLES, DIR]);
 test.after(() => fs.rmSync(DIR, { recursive: true, force: true }));
@@ -134,6 +149,16 @@ test('Comprimir nunca entrega menos páginas: si gs pierde páginas, devuelve el
     t.after(() => { gsOverride = null; });
     for (const level of ['extreme', 'recommended', 'low']) {
         const { res, body, input } = await post(t, '/v1/compress', 'plain.pdf', { level });
+        assert.equal(res.status, 200, level);
+        assert.equal(res.headers.get('x-compress-status'), 'already-optimized', level);
+        assert.ok(body.equals(input), `${level}: debe ser el original sin tocar`);
+    }
+});
+
+test('Comprimir con una imagen protegida demasiado anidada para restaurarla: devuelve el original', { skip }, async (t) => {
+    t.mock.method(console, 'warn', () => {});
+    for (const level of ['extreme', 'recommended', 'low']) {
+        const { res, body, input } = await post(t, '/v1/compress', 'hondo.pdf', { level });
         assert.equal(res.status, 200, level);
         assert.equal(res.headers.get('x-compress-status'), 'already-optimized', level);
         assert.ok(body.equals(input), `${level}: debe ser el original sin tocar`);

@@ -687,10 +687,23 @@ def _string_bytes(obj):
 # No se sigue hacia el padre ni hacia la página: se saldría del objeto que se examina.
 _UPWARD_KEYS = {"Parent", "P"}
 
+# Niveles de arrays, diccionarios y referencias que recorre _walk_strings. Ningún PDF normal se
+# acerca (las acciones, capas o /PieceInfo tienen pocos); una cadena de miles de referencias
+# agotaba la pila de Python (RecursionError, 500). Con anidamiento directo, MuPDF ya no lee
+# un objeto de más de unos 256 niveles (ni lo escribe en la salida).
+MAX_NESTING = 200
 
-def _walk_strings(obj, pages, seen):
+
+class NestingTooDeep(Exception):
+    """Un objeto más anidado que MAX_NESTING: no se ha podido recorrer entero."""
+
+
+def _walk_strings(obj, pages, seen, depth=0):
     """(contenedor, clave o índice, cadena) de cada cadena de obj y de lo que referencia,
-    salvo páginas y Parent/P. `seen`: números de objeto ya visitados."""
+    salvo páginas y Parent/P. `seen`: números de objeto ya visitados. NestingTooDeep si pasa
+    de MAX_NESTING niveles: lo que haya más abajo no se puede dar por limpio."""
+    if depth > MAX_NESTING:
+        raise NestingTooDeep()
     if _m.pdf_is_indirect(obj):
         num = _m.pdf_to_num(obj)
         if num in pages or num in seen:
@@ -702,7 +715,7 @@ def _walk_strings(obj, pages, seen):
             if _m.pdf_is_string(item):
                 yield obj, i, item
             else:
-                yield from _walk_strings(item, pages, seen)
+                yield from _walk_strings(item, pages, seen, depth + 1)
     elif _m.pdf_is_dict(obj):
         for i in range(_m.pdf_dict_len(obj)):
             key = _m.pdf_dict_get_key(obj, i)
@@ -712,7 +725,7 @@ def _walk_strings(obj, pages, seen):
             if _m.pdf_is_string(val):
                 yield obj, key, val
             else:
-                yield from _walk_strings(val, pages, seen)
+                yield from _walk_strings(val, pages, seen, depth + 1)
 
 
 def _has_term(obj, found, pages):
@@ -1591,8 +1604,15 @@ def apply(input_path, output_path, items):
     remove_associated_files(doc)
     found = term_matcher(terms)
     if found is not None:
-        clean_layer_names(doc, found)
-        clean_structures(doc, found)
+        # Un objeto más anidado que MAX_NESTING no se ha podido limpiar entero: no se da por
+        # verificado (server.js responde 422) y no se escribe la salida.
+        try:
+            clean_layer_names(doc, found)
+            clean_structures(doc, found)
+        except NestingTooDeep:
+            doc.close()
+            return {"success": False, "verified": False, "leaks": ["nesting_depth"],
+                    "applied": applied_count, "failed": failed_items}
     doc.set_metadata({
         "creator": OUTPUT_METADATA["creator"],
         "producer": OUTPUT_METADATA["producer"],

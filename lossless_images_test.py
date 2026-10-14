@@ -298,6 +298,63 @@ class ProtegerYRestaurar(unittest.TestCase):
         self.assertIsNone(li.marker_id(b"\x00" * 16))
 
 
+def make_deep_pdf(path, depth):
+    """Página con una imagen de 1 bit (protegida) cuyo diccionario apunta a una cadena de
+    `depth` referencias: /Foo N 0 R -> [M 0 R] -> ... -> (fondo)."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_image(pymupdf.Rect(72, 72, 172, 172), pixmap=pymupdf.Pixmap(pymupdf.csGRAY, 8, 1, b"\x00" * 8, 0))
+    img = next(x for x in range(1, doc.xref_length()) if doc.xref_get_key(x, "Subtype") == ("name", "/Image"))
+    doc.update_object(img, "<</Type/XObject/Subtype/Image/Width 8/Height 1/ColorSpace/DeviceGray/BitsPerComponent 1>>")
+    doc.update_stream(img, b"\x55", compress=False)
+    last = doc.get_new_xref()
+    doc.update_object(last, "(fondo)")
+    for _ in range(depth - 1):
+        x = doc.get_new_xref()
+        doc.update_object(x, f"[{last} 0 R]")
+        last = x
+    doc.xref_set_key(img, "Foo", f"{last} 0 R")
+    doc.save(path)
+    doc.close()
+
+
+class AnidamientoProfundo(unittest.TestCase):
+    """restore copia la imagen original y todo lo que referencia: con una cadena de referencias
+    más larga que MAX_NESTING falla con NestingTooDeep (jpeg_flate.py sale con EXIT_TOO_DEEP y
+    server.js devuelve el original), nunca copia a medias en silencio. Antes, con unos 330
+    niveles, RecursionError: jpeg_flate.py salía con 1 y /v1/compress respondía 500."""
+
+    def _restore(self, depth):
+        d = tmp_dir(self)
+        src = os.path.join(d, "in.pdf")
+        make_deep_pdf(src, depth)
+        doc = pymupdf.open(src)
+        self.assertEqual(len(li.protect(doc)), 1)
+        return li.restore(doc, pymupdf.open(src))
+
+    def test_mas_hondo_que_el_limite_falla(self):
+        for depth in (li.MAX_NESTING + 50, 3000):
+            with self.subTest(depth=depth):
+                with self.assertRaises(li.NestingTooDeep):
+                    self._restore(depth)
+
+    def test_dentro_del_limite_se_restaura(self):
+        self.assertEqual(self._restore(li.MAX_NESTING - 10), 1)
+
+    def test_jpeg_flate_sale_con_su_codigo(self):
+        d = tmp_dir(self)
+        src, marked, out = (os.path.join(d, n) for n in ("in.pdf", "marked.pdf", "out.pdf"))
+        make_deep_pdf(src, 3000)
+        doc = pymupdf.open(src)
+        li.protect(doc)
+        doc.save(marked)
+        proc = subprocess.run([sys.executable, os.path.join(API_DIR, "jpeg_flate.py"), marked, out, "--originals", src],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, jpeg_flate.EXIT_TOO_DEEP, proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertFalse(os.path.exists(out))
+
+
 @unittest.skipUnless(GS and NODE, "hace falta Ghostscript y node para comprimir de verdad")
 class ComprimirConGhostscript(unittest.TestCase):
     """Extremo a extremo con los argumentos reales de server.js, en los tres niveles."""

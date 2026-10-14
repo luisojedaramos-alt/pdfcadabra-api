@@ -56,7 +56,7 @@ app.use(cors({
             callback(null, false);
         }
     },
-    exposedHeaders: ['X-Redact-Warnings', 'X-Redact-Text-Loss', 'X-Compress-Status', 'X-Compress-Level', 'Retry-After']
+    exposedHeaders: ['X-Redact-Text-Loss', 'X-Compress-Status', 'X-Compress-Level', 'Retry-After']
 }));
 
 // Origin obligatorio en los POST de /v1/*: sin un Origin permitido, 403 sin leer el

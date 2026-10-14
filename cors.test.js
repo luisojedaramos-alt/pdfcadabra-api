@@ -55,3 +55,15 @@ test('buildAllowedOrigins: base según NODE_ENV y extras válidos sin duplicados
         quiet.mock.restore();
     }
 });
+
+test('cabeceras expuestas: exactamente las que lee la web (sin X-Redact-Warnings, que ya no se envía)', async () => {
+    const server = app.listen(0);
+    try {
+        await new Promise((r) => server.once('listening', r));
+        const res = await fetch(`http://127.0.0.1:${server.address().port}/health`, { headers: { Origin: 'https://pdfcadabra.com' } });
+        const exposed = res.headers.get('access-control-expose-headers').split(',').map((h) => h.trim());
+        assert.deepEqual(exposed, ['X-Redact-Text-Loss', 'X-Compress-Status', 'X-Compress-Level', 'Retry-After']);
+    } finally {
+        server.close();
+    }
+});

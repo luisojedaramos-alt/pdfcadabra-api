@@ -116,7 +116,8 @@
   término -> cadena vacía; prefijo de `/PageLabels` -> vacío; `/I` de un `/Threads` -> fuera.
 - Censuras fallidas (`failed` del informe, p. ej. página inexistente): si falla CUALQUIERA,
   `server.js` responde 422 `REDACT_ITEMS_FAILED` con la lista y no envía nada (desde
-  2026-10-07; antes, con fallos parciales, se enviaba con `X-Redact-Warnings`, que ya no se usa).
+  2026-10-07; antes, con fallos parciales, se enviaba con `X-Redact-Warnings`, que ya no se usa; desde 2026-10-14 tampoco va en
+  `exposedHeaders`: ni la API ni la web la usaban).
   `item_zone` da por fallida la censura con página negativa o inexistente y con un
   rectángulo invertido, vacío o que no toca la página (MuPDF los aceptaba sin tapar nada).
   Los rectángulos llegan sin girar, como los da `search_for`: se comparan con

@@ -486,7 +486,10 @@ app.post('/v1/redact/apply', requireOrigin, checkUploadSize(APPLY_FIELDS), limit
     const resultsPath = path.join(UPLOAD_DIR, `redact_results_${baseId}.json`); // NUEVO: Archivo de reporte
     // Copias de trabajo de redact.py (capas OCG) que solo quedan si se le mata: él las borra al terminar.
     const workCopies = [`${outputPath}.capas.pdf`, `${outputPath}.pre.pdf`, `${outputPath}.pre.pdf.capas.pdf`];
-    cleanupOnClose(req, res, () => secureCleanup([inputPath, itemsPath, outputPath, resultsPath, ...workCopies]));
+    // Una sola lista para todos los borrados de la ruta: así ninguno se deja las copias de trabajo.
+    const tempFiles = [inputPath, itemsPath, outputPath, resultsPath, ...workCopies];
+    const cleanup = () => secureCleanup(tempFiles);
+    cleanupOnClose(req, res, cleanup);
 
     try {
         fs.writeFileSync(itemsPath, req.body.items, 'utf-8'); // cadena JSON ya validada (requireItems)
@@ -496,7 +499,7 @@ app.post('/v1/redact/apply', requireOrigin, checkUploadSize(APPLY_FIELDS), limit
             if (error) {
                 if (isEncryptedExit(error)) console.warn('[Redact] PDF con contraseña de apertura: 422 sin procesar.');
                 else logProcessError("Error en censura:", error, stderr);
-                secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
+                cleanup();
                 return sendExecError(res, error, 'Error aplicando la censura forense.');
             }
 
@@ -516,7 +519,7 @@ app.post('/v1/redact/apply', requireOrigin, checkUploadSize(APPLY_FIELDS), limit
             if (!report || report.verified !== true) {
                 const leaks = (report && Array.isArray(report.leaks)) ? report.leaks.join(', ') : 'sin informe';
                 console.error(`[Redact] Verificación final fallida (${leaks}): no se envía el documento.`);
-                secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
+                cleanup();
                 return res.status(422).json({
                     code: 'REDACT_NOT_VERIFIED',
                     error: 'No hemos podido garantizar la censura de este documento; no se ha descargado nada.'
@@ -532,7 +535,7 @@ app.post('/v1/redact/apply', requireOrigin, checkUploadSize(APPLY_FIELDS), limit
             // enviaba con X-Redact-Warnings).
             if (failed.length > 0) {
                 console.error(`[Redact] Fallaron ${failed.length}/${totalRequested} censuras:`, failedMessages(failed));
-                secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
+                cleanup();
                 return res.status(422).json({
                     code: 'REDACT_ITEMS_FAILED',
                     error: `No se pudieron aplicar ${failed.length} de ${totalRequested} censuras. No se ha descargado nada.`,
@@ -555,11 +558,11 @@ app.post('/v1/redact/apply', requireOrigin, checkUploadSize(APPLY_FIELDS), limit
                     console.error("Error enviando el documento censurado:", describeError(err));
                     res.status(500).json({ error: 'Error enviando el documento censurado.' });
                 }
-                secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
+                cleanup();
             });
         });
     } catch (e) {
-        secureCleanup([inputPath, itemsPath, outputPath, resultsPath]);
+        cleanup();
         res.status(500).json({ error: 'Error del servidor preparando la censura.' });
     }
 });

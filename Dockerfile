@@ -6,10 +6,11 @@ RUN apt-get update && apt-get install -y --fix-missing ghostscript poppler-utils
 
 WORKDIR /app
 
-# Crear entorno virtual de Python e instalar PyMuPDF
+# Crear entorno virtual de Python e instalar PyMuPDF y Pillow (versiones en requirements.txt)
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install PyMuPDF==1.28.2
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
 
 COPY package*.json ./
 RUN npm install

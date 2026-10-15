@@ -33,9 +33,14 @@
   verificación), Anonimizar 240 s por proceso. Health check de Docker a `/health`
   cada 30 s.
 - Comprobado en el servidor el 2026-10-15 (`docker inspect` del contenedor,
-  revisión c4e54da). Revisión actual en producción: c4e54da (desplegada el
-  2026-10-15, auditoría externa: lote B, H-06 y restauración fallida). Vuelta atrás:
-  imagen `pdfcadabra-api:rollback-a9f24d1` y `/opt/pdfcadabra/api.old` (a9f24d1).
+  revisión e64300a). Revisión actual en producción: e64300a (desplegada el
+  2026-10-15 a las 23:33, parada ordenada, errores de Caddy con CORS y descargas
+  `no-store`; Caddy reiniciado, mismo certificado). Vuelta atrás: imagen
+  `pdfcadabra-api:rollback-c4e54da` y `/opt/pdfcadabra/api.old` (c4e54da). Ese fue el
+  último despliegue que cortó a los 10 s: desde e64300a el contenedor espera
+  (`stop_timeout` 600 comprobado). Al reiniciar Caddy salen siempre los avisos
+  `HTTP/2 (y HTTP/3) skipped because it requires TLS` en `:80` (por `protocols h1 h2`; ya
+  salían antes).
 
 # Parada ordenada (rama fix/despliegue-sin-cortes, 2026-10-15)
 
@@ -59,6 +64,14 @@
   mantener igual que `ALLOWED_ORIGINS` y `EXTRA_ALLOWED_ORIGINS`), `Vary: Origin` y
   `Cache-Control: no-store`. Test en `caddy-errors.test.js` con un Caddy real
   (`CADDY=<ruta>` o `caddy` en el PATH; si no, se salta).
+- El 413 de Caddy hoy no se alcanza en las rutas POST: la API responde antes (por
+  Content-Length por encima del límite + margen, o multer a los 50 MB sin él) con su propio
+  413, que ya lleva CORS. Comprobado en producción el 2026-10-15 con 134.000.001 bytes: 413
+  de la API con `Access-Control-Allow-Origin`. El de Caddy queda como red de seguridad.
+- Descargas (`sendDocument`, desde 2026-10-15): los PDF de `/v1/compress` (también el original
+  devuelto) y `/v1/redact/apply` salen con `Cache-Control: no-store` y sin `ETag` ni
+  `Last-Modified` (antes, los de `res.sendFile`: `public, max-age=0`). Test en
+  `download-cache.test.js`.
 - Pendiente (no resuelto): cuando Caddy o la API responden antes de leer el cuerpo entero
   (413 de Caddy, o 403/413/429/503 de la API con `Connection: close`) y el cliente sigue
   enviando, el RST puede llegar antes de que lea la respuesta (comprobado con el 413 de Caddy

@@ -33,6 +33,10 @@ services:
       - /tmp:size=3g,mode=1777
     mem_limit: 6g
     pids_limit: 512
+    # Al recrear el contenedor (cada despliegue), SIGTERM: la API deja de aceptar conexiones y
+    # termina las peticiones en curso (máx. SHUTDOWN_GRACE_MS, 570 s, en server.js). Por
+    # defecto Docker solo esperaba 10 s antes de SIGKILL y cortaba lo que estuviera en marcha.
+    stop_grace_period: 600s
     security_opt:
       - no-new-privileges:true
     expose:

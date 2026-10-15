@@ -875,14 +875,53 @@ app.use((err, req, res, next) => {
 // server.requestTimeout tras listen no lo aplicaba (comprobado con Node 26: el 408 llegaba
 // a los 60 s del headersTimeout). Las cabeceras siguen teniendo 60 s.
 const REQUEST_TIMEOUT_MS = 600000;
-const startServer = (listenPort, callback) =>
-    http.createServer({ requestTimeout: REQUEST_TIMEOUT_MS }, app).listen(listenPort, callback);
+
+// Parada ordenada con SIGTERM (el que manda Docker al recrear el contenedor en cada despliegue)
+// o SIGINT: deja de aceptar conexiones, termina las peticiones en curso (también las que esperan
+// en cola) y sale con 0; si alguna sigue pasado `graceMs`, sale con 1. Antes node, PID 1 del
+// contenedor y sin manejador, ignoraba SIGTERM: Docker lo mataba con SIGKILL a los 10 s y una
+// petición en marcha acababa en un 502 de Caddy (estado 0 en la web, 2026-10-15). El plazo
+// cubre la petición más larga tras la subida (540 s en Pro, ver SWEEP_MAX_AGE_MS) más el envío;
+// `stop_grace_period` del compose tiene que ser mayor. Las conexiones keep-alive de Caddy se
+// cierran en cuanto quedan libres: server.close solo cierra las que ya lo están y una ocupada
+// seguía abierta tras su respuesta (comprobado), así que se repite cada segundo.
+const SHUTDOWN_GRACE_MS = envInt('SHUTDOWN_GRACE_MS', 570000);
+const SHUTDOWN_IDLE_CHECK_MS = 1000;
+const handleShutdown = (server, { exit = process.exit, graceMs = SHUTDOWN_GRACE_MS } = {}) => {
+    const shutdown = (signal) => {
+        process.removeListener('SIGTERM', shutdown);
+        process.removeListener('SIGINT', shutdown);
+        console.log(`${signal}: no se aceptan conexiones nuevas; se terminan las peticiones en curso.`);
+        const timer = setTimeout(() => {
+            console.warn(`Parada: quedan peticiones en curso tras ${Math.round(graceMs / 1000)} s; se cortan.`);
+            exit(1);
+        }, graceMs);
+        timer.unref();
+        const idle = setInterval(() => server.closeIdleConnections(), SHUTDOWN_IDLE_CHECK_MS);
+        idle.unref();
+        server.close(() => {
+            clearTimeout(timer);
+            clearInterval(idle);
+            exit(0);
+        });
+    };
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown);
+};
+
+// options.shutdown: activa la parada ordenada ({ exit, graceMs } opcionales; los tests lo usan
+// para no terminar el proceso).
+const startServer = (listenPort, callback, options = {}) => {
+    const server = http.createServer({ requestTimeout: REQUEST_TIMEOUT_MS }, app).listen(listenPort, callback);
+    if (options.shutdown) handleShutdown(server, options.shutdown);
+    return server;
+};
 
 // Iniciar servidor (solo al ejecutarlo con `node server.js`; los tests importan `app`)
 if (require.main === module) {
     startServer(port, () => {
         console.log(`Servidor PDFcadabra LegalTech activo en puerto ${port}`);
-    });
+    }, { shutdown: {} });
 }
 
 module.exports = app;

@@ -37,6 +37,34 @@
   2026-10-15, auditoría externa: lote B, H-06 y restauración fallida). Vuelta atrás:
   imagen `pdfcadabra-api:rollback-a9f24d1` y `/opt/pdfcadabra/api.old` (a9f24d1).
 
+# Parada ordenada (rama fix/despliegue-sin-cortes, 2026-10-15)
+
+- Incidencia del 2026-10-15 (~00:30, durante el despliegue de c4e54da): un apply de 51,5 MB
+  acabó en la web con estado 0. node era el PID 1 del contenedor sin manejador e ignoraba
+  SIGTERM: al recrear el contenedor, Docker lo mataba con SIGKILL a los 10 s y Caddy
+  respondía 502 sin cabeceras CORS.
+- Ahora `startServer(port, cb, { shutdown: {} })` (solo con `node server.js`): con SIGTERM o
+  SIGINT, `server.close` (no acepta conexiones nuevas), las peticiones en curso y en cola
+  terminan, y sale con 0; las keep-alive de Caddy se cierran al quedar libres
+  (`closeIdleConnections` cada segundo: `close` solo cerraba las que ya lo estaban). Si
+  pasan `SHUTDOWN_GRACE_MS` (570 s, por encima de los 540 s de la petición más larga en
+  Pro), sale con 1. `stop_grace_period: 600s` en el compose. Test en `shutdown.test.js`.
+
+# Errores que genera Caddy
+
+- `handle_errors` del Caddyfile (snippet `errores_cors`): el 502 (la API no responde: un
+  despliegue o una caída) sale como JSON `{code: "SERVICE_UNAVAILABLE", error}` con
+  `Retry-After: 10`, y el 413 de `max_size`, como el de la API (`FILE_TOO_LARGE`). Los dos
+  llevan `Access-Control-Allow-Origin` para los orígenes de la web (regex que hay que
+  mantener igual que `ALLOWED_ORIGINS` y `EXTRA_ALLOWED_ORIGINS`), `Vary: Origin` y
+  `Cache-Control: no-store`. Test en `caddy-errors.test.js` con un Caddy real
+  (`CADDY=<ruta>` o `caddy` en el PATH; si no, se salta).
+- Pendiente (no resuelto): cuando Caddy o la API responden antes de leer el cuerpo entero
+  (413 de Caddy, o 403/413/429/503 de la API con `Connection: close`) y el cliente sigue
+  enviando, el RST puede llegar antes de que lea la respuesta (comprobado con el 413 de Caddy
+  y un cliente de Node en Windows: ECONNRESET; con los de la API y con navegadores, sin
+  comprobar). Llevan CORS, pero el navegador podría verlo igual como fallo de red.
+
 # Health check
 
 - `GET /health` responde 200 `{"status":"ok"}` con `Cache-Control: no-store`.

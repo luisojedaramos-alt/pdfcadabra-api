@@ -1030,5 +1030,33 @@ class EstructurasLargasNormales(Base):
         self.assertIn("otro", fitz.open(out).resolve_names())
 
 
+class TerminoCortadoPorElBorde(Base):
+    """Página 65 de dos PDF del corpus del lote 2d (2026-10-16): «procurador» se salía por el
+    borde derecho y solo se veía «procurad». La parte oculta completa el término, así que la
+    palabra entera se censura como texto oculto (decisión de Luis, 2026-10-07), también su parte
+    visible: si no, quedarían 8 de sus 10 letras. Esa zona no es del usuario, así que la página
+    sale en text_loss_pages (X-Redact-Text-Loss): lo perdido es un trozo del término, no otro
+    texto."""
+
+    def test_se_censura_entero_y_se_avisa(self):
+        doc = base_doc()  # con el término visible en (72, 100)
+        doc[0].insert_text((480, 400), f"del {TERM}", fontsize=14)  # sale por la derecha
+        src = self.save(doc)
+        visible = [w[4] for w in fitz.open(src)[0].get_text("words")]
+        self.assertEqual(visible.count(TERM), 1)  # la de base_doc; la del borde, cortada:
+        self.assertTrue(any(TERM.startswith(w) and 4 <= len(w) < len(TERM) for w in visible), visible)
+
+        items = self.search_items(src)  # solo encuentra la aparición visible
+        self.assertEqual(len(items), 1)
+        report, out = self.apply(src, items)
+        self.assertTrue(server_delivers(report), report)
+        self.assertFalse(term_anywhere(out))
+        self.assertEqual(report["text_loss_pages"], [1])
+        left = [w[4] for w in fitz.open(out)[0].get_text("words", clip=fitz.INFINITE_RECT())]
+        self.assertFalse([w for w in left if w[:4] == TERM[:4]], left)  # ni el trozo visible
+        for word in ("Nombre:", "fin", "del", CONTROL):
+            self.assertIn(word, left)
+
+
 if __name__ == "__main__":
     unittest.main()

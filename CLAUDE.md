@@ -143,7 +143,10 @@
   solo de texto: sin relleno, sin tocar imágenes ni trazos (un fondo que sale del CropBox se
   ve). Esas zonas no van a `zones_by_page`: si se llevaran texto visible, lo avisa
   `X-Redact-Text-Loss`. Las palabras llegan sin girar: la zona visible es
-  `page.rect * derotation_matrix`. Con capas OCG, las palabras de todas las capas salen de
+  `page.rect * derotation_matrix`. Una palabra cortada por el borde («procurador» del que solo
+  se ve «procurad», página 65 de dos PDF del corpus del lote 2d) se censura entera, también su
+  parte visible, y la página sale en `X-Redact-Text-Loss`: lo perdido es un trozo del término,
+  no otro texto (test `TerminoCortadoPorElBorde` en `redact_leaks_test.py`). Con capas OCG, las palabras de todas las capas salen de
   una copia en disco (`<salida>.pre.pdf` y su `.capas.pdf`, borradas al terminar), así que
   también se censura el texto de las capas apagadas.
 - Nombres de capa (`clean_layer_names`, tras `scrub`): una capa cuyo `/Name` contiene un

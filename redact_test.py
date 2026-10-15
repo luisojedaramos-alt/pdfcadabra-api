@@ -410,6 +410,221 @@ class TamanoDeSalida(unittest.TestCase):
         self.assertIsNone(redact.jpeg_quality(b"no es un jpeg"))
 
 
+# ==========================================
+# Lote 2d: la salida no pesa más que la entrada
+# ==========================================
+SCAN_W, SCAN_H = 1240, 1754  # A4 a 150 ppp, a página completa
+
+
+def scan_image(mode, seed=3):
+    """Escaneo en color sintético: papel con ruido suave, franjas de color, renglones de texto
+    y un sello rojo (con croma de detalle fino, donde el submuestreo 4:2:0 ahorra)."""
+    import random
+    from PIL import Image, ImageDraw, ImageFilter
+    rng = random.Random(seed)
+    img = Image.new("RGB", (SCAN_W, SCAN_H), (244, 240, 229))
+    img = Image.blend(img, Image.effect_noise((SCAN_W, SCAN_H), 12).convert("RGB"), 0.05)
+    d = ImageDraw.Draw(img)
+    d.rectangle([90, 70, 1150, 150], fill=(206, 219, 236))
+    for i in range(45):
+        y = 220 + 32 * i
+        color = (20, 40, 140) if i % 3 else (150, 30, 30)
+        for x in range(100, 100 + rng.randrange(600, 1000), 14):
+            d.rectangle([x, y, x + rng.randrange(4, 11), y + 14], fill=color)
+    d.ellipse([850, 1350, 1100, 1600], outline=(176, 42, 48), width=10)
+    img = img.filter(ImageFilter.GaussianBlur(0.7))
+    return img.convert(mode)
+
+
+def add_image(doc, page, data, filt, colorspace, name="Im", rect=None):
+    """Imagen ya codificada (data con su filtro) dibujada en `rect` (por defecto, la página)."""
+    xref = doc.get_new_xref()
+    doc.update_object(xref, f"<< /Type /XObject /Subtype /Image /Width {SCAN_W} /Height {SCAN_H} "
+                            f"/ColorSpace {colorspace} /BitsPerComponent 8 >>")
+    doc.update_stream(xref, data, compress=False)
+    doc.xref_set_key(xref, "Filter", filt)
+    r = rect or page.rect
+    if not page.get_contents():
+        page.insert_text((0, 0), " ")  # crea /Contents y /Resources
+    res = int(doc.xref_get_key(page.xref, "Resources")[1].split()[0])  # PyMuPDF lo crea indirecto
+    xobjs = doc.xref_get_key(res, "XObject")
+    entries = (xobjs[1][2:-2] if xobjs[0] == "dict" else "") + f" /{name} {xref} 0 R"
+    doc.xref_set_key(res, "XObject", f"<<{entries}>>")
+    c = page.get_contents()[0]
+    doc.update_stream(c, doc.xref_stream(c) + f"\nq {r.width} 0 0 {r.height} {r.x0} {842 - r.y1} cm /{name} Do Q".encode())
+    return xref
+
+
+def encode(img, fmt, **kw):
+    import io
+    buf = io.BytesIO()
+    img.save(buf, fmt, **kw)
+    return buf.getvalue()
+
+
+def make_image_pdf(path, pages):
+    """pages: [[(datos, filtro, espacio de color, rect o None), ...], ...]."""
+    doc = fitz.open()
+    for images in pages:
+        page = doc.new_page(width=595, height=842)
+        for n, (data, filt, cs, rect) in enumerate(images):
+            add_image(doc, page, data, filt, cs, name=f"Im{n}", rect=rect)
+    doc.save(path)
+    doc.close()
+
+
+def first_image(path, page=0):
+    """(filtro, componentes, bytes del flujo, Pixmap) de la primera imagen de la página."""
+    doc = fitz.open(path)
+    x = doc[page].get_images(full=True)[0][0]
+    return doc.xref_get_key(x, "Filter")[1], fitz.Pixmap(doc, x).n, len(doc.xref_stream_raw(x)), fitz.Pixmap(doc, x)
+
+
+def jpeg_sampling(path):
+    """Factores de muestreo (h, v) de la luminancia de la primera JPEG de la página 1."""
+    import io
+    from PIL import Image
+    doc = fitz.open(path)
+    x = doc[0].get_images(full=True)[0][0]
+    data = doc.xref_stream_raw(x)
+    if "Flate" in doc.xref_get_key(x, "Filter")[1]:
+        data = zlib.decompress(data)
+    return Image.open(io.BytesIO(data)).layer[0][1:3]
+
+
+# Zona en la imagen a página completa (en píxeles de la imagen: 150/72 por punto, con margen).
+IMG_ZONE = (int(ZONE[0] * SCAN_W / 595) - 4, int(ZONE[1] * SCAN_H / 842) - 4,
+            int(ZONE[2] * SCAN_W / 595) + 5, int(ZONE[3] * SCAN_H / 842) + 5)
+
+
+def pixels_outside_zone(pix):
+    """Píxeles de la imagen con la zona censurada (IMG_ZONE) pintada de 0 en los dos lados."""
+    from PIL import Image
+    mode = {1: "L", 3: "RGB", 4: "CMYK"}[pix.n]
+    img = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+    img.paste(0, IMG_ZONE)
+    return img
+
+
+def mean_abs_diff(a, b):
+    from PIL import ImageChops, ImageStat
+    return max(ImageStat.Stat(ImageChops.difference(a, b)).mean)
+
+
+class TamanoDeSalidaLote2d(unittest.TestCase):
+    """Lote 2d (2026-10-15): un escaneo JPEG 4:2:0 crecía un 11 % (MuPDF lo recodificaba en
+    4:4:4), uno en JPEG CMYK se quedaba en Flate (×3,3) y uno en JPEG 2000 pasaba a JPEG q85."""
+
+    def apply_zone(self, src):
+        out = tmp_path(self, "out.pdf")
+        report = redact.apply(src, out, zone_items(1))
+        self.assertTrue(report["verified"], report)
+        self.assertTrue(zone_is_black(out))
+        return out
+
+    def test_jpeg_rgb_420_conserva_su_submuestreo_y_no_crece(self):
+        src = tmp_path(self, "in.pdf")
+        make_image_pdf(src, [[(encode(scan_image("RGB"), "JPEG", quality=85, subsampling=2),
+                               "/DCTDecode", "/DeviceRGB", None)]])
+        out = self.apply_zone(src)
+        self.assertIn("DCTDecode", first_image(out)[0])
+        self.assertEqual(jpeg_sampling(out), (2, 2))  # 4:2:0, como el original
+        self.assertLessEqual(os.path.getsize(out), os.path.getsize(src))
+
+    def test_jpeg_cmyk_vuelve_a_jpeg_cmyk_con_sus_colores(self):
+        cmyk = scan_image("CMYK")
+        for decode in ("", "/Decode [1 0 1 0 1 0 1 0]"):  # Adobe invertido, con /Decode o sin él
+            with self.subTest(decode=decode):
+                src = tmp_path(self, "in.pdf")
+                make_image_pdf(src, [[(encode(cmyk, "JPEG", quality=90), "/DCTDecode", "/DeviceCMYK", None)]])
+                if decode:
+                    doc = fitz.open(src)
+                    x = doc[0].get_images(full=True)[0][0]
+                    doc.xref_set_key(x, "Decode", "[1 0 1 0 1 0 1 0]")
+                    doc.saveIncr()
+                    doc.close()
+                out = self.apply_zone(src)
+                filt, n, _, pix = first_image(out)
+                self.assertIn("DCTDecode", filt)
+                self.assertEqual(n, 4)
+                self.assertLessEqual(os.path.getsize(out), os.path.getsize(src) * 1.1)
+                # Mismos colores que el original fuera de la zona (decodificados por MuPDF).
+                before = pixels_outside_zone(first_image(src)[3])
+                self.assertLess(mean_abs_diff(before, pixels_outside_zone(pix)), 3)
+
+    def test_jpeg2000_sin_perdida_sale_sin_perdida(self):
+        src = tmp_path(self, "in.pdf")
+        make_image_pdf(src, [[(encode(scan_image("RGB"), "JPEG2000", irreversible=False, no_jp2=True),
+                               "/JPXDecode", "/DeviceRGB", None)]])
+        self.assertIs(redact.jpx_reversible(fitz.open(src).xref_stream_raw(fitz.open(src)[0].get_images()[0][0])), True)
+        out = self.apply_zone(src)
+        self.assertNotIn("DCT", first_image(out)[0])
+        # Fuera de la zona, píxeles idénticos.
+        self.assertEqual(pixels_outside_zone(first_image(src)[3]).tobytes(),
+                         pixels_outside_zone(first_image(out)[3]).tobytes())
+
+    def test_jpeg2000_con_perdida_no_crece(self):
+        src = tmp_path(self, "in.pdf")
+        img = scan_image("RGB")
+        data = encode(img, "JPEG2000", quality_mode="rates", quality_layers=[20], irreversible=True, no_jp2=True)
+        make_image_pdf(src, [[(data, "/JPXDecode", "/DeviceRGB", None)]])
+        self.assertIs(redact.jpx_reversible(data), False)
+        out = self.apply_zone(src)
+        self.assertLessEqual(os.path.getsize(out), os.path.getsize(src) * 1.1)
+
+    def test_transformada_jpeg2000(self):
+        from PIL import Image
+        img = Image.new("RGB", (64, 64), (10, 120, 200))
+        self.assertIs(redact.jpx_reversible(encode(img, "JPEG2000", irreversible=False, no_jp2=True)), True)
+        self.assertIs(redact.jpx_reversible(encode(img, "JPEG2000", irreversible=True, no_jp2=True)), False)
+        # En un contenedor JP2, igual.
+        self.assertIs(redact.jpx_reversible(encode(img, "JPEG2000", irreversible=True)), False)
+        # Ilegible: en duda (se trata como sin pérdida).
+        self.assertIsNone(redact.jpx_reversible(b"no es un jpeg 2000"))
+        self.assertIsNone(redact.jpx_reversible(encode(img, "JPEG2000", irreversible=True, no_jp2=True)[:20]))
+
+    def test_imagenes_no_censuradas_quedan_identicas(self):
+        """Imágenes que la zona no toca (en la página censurada y en otra sin censurar): mismos
+        píxeles y mismo flujo comprimido que en la entrada."""
+        from PIL import Image
+        rgb, gray, cmyk = scan_image("RGB"), scan_image("L"), scan_image("CMYK")
+        bits = Image.new("1", (SCAN_W, SCAN_H), 1)
+        bits.paste(0, (100, 100, 600, 900))
+        aside = fitz.Rect(300, 500, 560, 800)  # lejos de la zona
+        kinds = [
+            (encode(rgb, "JPEG", quality=85), "/DCTDecode", "/DeviceRGB"),
+            (encode(gray, "JPEG", quality=75), "/DCTDecode", "/DeviceGray"),
+            (encode(cmyk, "JPEG", quality=90), "/DCTDecode", "/DeviceCMYK"),
+            (encode(rgb, "JPEG2000", irreversible=False, no_jp2=True), "/JPXDecode", "/DeviceRGB"),
+            (encode(rgb, "JPEG2000", quality_mode="rates", quality_layers=[20], no_jp2=True), "/JPXDecode", "/DeviceRGB"),
+        ]
+        src = tmp_path(self, "in.pdf")
+        # Página 1: la censurada (imagen tocada + una de cada tipo apartada). Página 2: sin censurar.
+        page1 = [(encode(rgb, "JPEG", quality=85), "/DCTDecode", "/DeviceRGB", None)]
+        page1 += [(d, f, cs, aside) for d, f, cs in kinds]
+        page2 = [(d, f, cs, None) for d, f, cs in kinds]
+        make_image_pdf(src, [page1, page2])
+        out = tmp_path(self, "out.pdf")
+        report = redact.apply(src, out, zone_items(1))
+        self.assertTrue(report["verified"], report)
+
+        def images(path, skip=None):
+            """[(página, flujo comprimido, píxeles)]. MuPDF renombra los recursos al censurar:
+            las imágenes se emparejan por su flujo, no por su nombre."""
+            doc = fitz.open(path)
+            return [(p.number, doc.xref_stream_raw(im[0]), fitz.Pixmap(doc, im[0]).samples)
+                    for p in doc for im in p.get_images(full=True) if (p.number, im[7]) != skip]
+
+        untouched = images(src, skip=(0, "Im0"))  # Im0: la que toca la zona
+        self.assertEqual(len(untouched), 2 * len(kinds))
+        out_images = images(out)
+        for n, (page, stream, samples) in enumerate(untouched):
+            with self.subTest(page=page, image=n):
+                same = [s for p, st, s in out_images if p == page and st == stream]
+                self.assertTrue(same, "el flujo comprimido ha cambiado")
+                self.assertEqual(same[0], samples)
+
+
 class BusquedaConRepeticiones(unittest.TestCase):
     """Un valor que se repite en la página se busca con search_for una sola vez (devuelve todas
     sus apariciones). Antes, una vez por repetición: k llamadas y k² hallazgos que luego se

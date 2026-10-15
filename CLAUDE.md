@@ -204,10 +204,23 @@
   frontend lo avisa en el panel final.
 - Tamaño de salida: `apply_redactions(PDF_REDACT_IMAGE_PIXELS)` sustituye cada imagen que
   toca una zona por una copia sin comprimir (un escaneo JPEG en gris pasaba de 24 a 67 MB).
-  `recompress_redacted_images` la vuelve a codificar como el original: JPEG con la calidad
-  estimada de su tabla de cuantización (DQT), 1 bit en CCITT G4 sin pérdida (con comprobación de
-  ida y vuelta) y JPEG 2000 en lo que ocupe menos, JPEG 85 o Flate. CMYK y el resto, sin
-  pérdida (Flate). La copia se empareja con su original por ancho, alto y bits por componente
+  `recompress_redacted_images` la vuelve a codificar como el original (lote 2d, 2026-10-16,
+  decisiones de Luis; con Pillow, en `requirements.txt`):
+  - JPEG gris y RGB: con las tablas DQT exactas del original y su mismo submuestreo (Pillow,
+    progresivo), o la de MuPDF (calidad estimada por la DQT, siempre 4:4:4) si ocupa menos. Solo
+    con MuPDF, un escaneo 4:2:0 crecía un 11 % (`color-50mb`, el de la incidencia del 15-10).
+  - JPEG CMYK: con las DQT del original. Se comprueban los colores decodificando con MuPDF
+    (`_same_colors`: diferencia media por canal ≤ 8 y sesgo ≤ 2; la buena da 0,1-3,3 y la mal
+    interpretada 255), primero tal cual y después con los valores invertidos (marca Adobe o
+    `/Decode`); si ninguna pasa, Flate sin pérdida. Antes, siempre Flate: ×3,3.
+  - JPEG 2000: `jpx_reversible` lee la transformada de cada COD y COC (cabecera principal y de
+    tile-parts). 5/3 o en duda -> sin pérdida: JPEG 2000 reversible o Flate, lo que ocupe menos,
+    con píxeles idénticos. 9/7 -> JPEG 2000 9/7 a la misma tasa de compresión (opción A: con 20
+    páginas, 50-63 s frente a 60-66 s de pasarlo a JPEG). Antes, los dos a JPEG q85.
+    Limitación: una 5/3 truncada por tasa también tiene pérdida, pero la cabecera no lo
+    distingue y sale sin pérdida (`color-jpx-25mb` de magic: 26,4 -> 52,4 MB).
+  - 1 bit en CCITT G4 sin pérdida (con comprobación de ida y vuelta), también los JBIG2. El resto,
+    sin pérdida (Flate). La copia se empareja con su original por ancho, alto y bits por componente
   (MuPDF cambia el xref y el nombre del recurso) y, si varias coinciden, por su posición en la
   página (por orden, un QR podía tomar la calidad JPEG de una foto del mismo tamaño). Una copia
   con 16 colores o menos nunca pasa a JPEG. MuPDF convierte las Indexed censuradas a RGB de 8

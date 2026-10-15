@@ -1,4 +1,5 @@
 import bisect
+import io
 import json
 import math
 import os
@@ -11,6 +12,7 @@ import zlib
 from collections import Counter, namedtuple
 
 import pymupdf as fitz
+from PIL import Image, ImageChops, ImageStat, JpegImagePlugin
 
 import pdf_check
 
@@ -445,9 +447,18 @@ def words_outside(words, zones, margin=1.0):
 # apply_redactions(PDF_REDACT_IMAGE_PIXELS) sustituye cada imagen que toca una zona por una
 # copia nueva SIN comprimir (con save(deflate=True) acaba en Flate): un escaneo JPEG en gris
 # pasaba de 24 a 67 MB y uno en color se multiplicaba por 5. Aquí se vuelve a codificar cada
-# imagen sustituida como su original: JPEG (o JPEG 2000) en JPEG con la calidad estimada del
-# original, y 1 bit (CCITT, JBIG2...) en CCITT G4 sin pérdida. Los píxeles tapados ya son
-# negros en la copia, así que recomprimir no puede devolver nada de lo censurado.
+# imagen sustituida como su original, y 1 bit (CCITT, JBIG2...) en CCITT G4 sin pérdida. Los
+# píxeles tapados ya son negros en la copia, así que recomprimir no puede devolver nada de lo
+# censurado. Solo lleva pérdida lo que ya la tenía (lote 2d, 2026-10-15; con Pillow):
+# - JPEG gris y RGB: con las tablas DQT exactas del original y su submuestreo, o la copia de
+#   MuPDF (calidad estimada por la DQT, siempre 4:4:4) si ocupa menos. Solo con MuPDF, un
+#   escaneo 4:2:0 crecía un 11 %.
+# - JPEG CMYK: con las DQT del original, comprobando los colores al decodificar (_same_colors);
+#   si no pasan, Flate sin pérdida. Antes siempre Flate: ×3,3.
+# - JPEG 2000 sin pérdida (5/3 o en duda, jpx_reversible): JPEG 2000 sin pérdida o Flate, lo que
+#   ocupe menos, con píxeles idénticos. Con pérdida (9/7): JPEG 2000 9/7 a la misma tasa de
+#   compresión que el original. Antes, los dos a JPEG q85. Una 5/3 truncada por tasa también
+#   tiene pérdida, pero la cabecera no lo distingue: sale sin pérdida.
 
 # Tabla de cuantización de luminancia de referencia (IJG, calidad 50).
 _STD_LUMA_SUM = sum((
@@ -543,37 +554,212 @@ def _encode_g4(doc, xref, width, height):
     return False
 
 
+_PIL_MODES = {1: "L", 3: "RGB", 4: "CMYK"}
+
+# Comprobación de colores de una JPEG CMYK recodificada (_same_colors), por canal y en niveles
+# de 0 a 255, entre la copia censurada y su JPEG decodificada por MuPDF: diferencia media
+# absoluta y diferencia de las medias (sesgo). Medido con dos escaneos sintéticos, de calidad 95
+# a 30: la buena da 0,1-3,3 de diferencia y 0,8 de sesgo como mucho; la mal interpretada (marca
+# Adobe o /Decode al revés), 255 en algún canal.
+CMYK_MAX_MEAN_DIFF = 8
+CMYK_MAX_BIAS = 2
+
+
+def _filters(doc, xref):
+    return re.findall(r"/(\w+)", doc.xref_get_key(xref, "Filter")[1])
+
+
+def _original_jpeg(doc, xref):
+    """Bytes del JPEG de la imagen original, sin la capa Flate si la lleva; None si no se puede.
+
+    No sirve extract_image: devuelve las CMYK convertidas a RGB, con otras tablas.
+    """
+    filters = _filters(doc, xref)
+    if not filters or filters[-1] != "DCTDecode" or any(f != "FlateDecode" for f in filters[:-1]):
+        return None
+    data = doc.xref_stream_raw(xref)
+    try:
+        for _ in filters[:-1]:
+            data = zlib.decompress(data)
+    except zlib.error:
+        return None
+    return data if data[:2] == b"\xff\xd8" else None
+
+
+def _original_jpx(doc, xref):
+    """Bytes del JPEG 2000 de la imagen original (solo /JPXDecode, sin más filtros) o None."""
+    return doc.xref_stream_raw(xref) if _filters(doc, xref) == ["JPXDecode"] else None
+
+
+def jpx_reversible(data):
+    """¿Usa este JPEG 2000 la transformada 5/3 reversible (sin pérdida)?
+
+    True si algún COD o COC (cabecera principal o de tile-part) la usa; False si todos usan la
+    9/7 irreversible; None si no se puede leer o no hay COD (en duda: se trata como sin pérdida).
+    """
+    start = data.find(b"\xff\x4f\xff\x51")  # SOC + SIZ: inicio del codestream (también en JP2)
+    if start < 0:
+        return None
+    transforms = []
+    try:
+        csiz = int.from_bytes(data[start + 40:start + 42], "big")
+        ccoc = 1 if csiz < 257 else 2
+
+        def header(pos, end_marker):
+            """Lee segmentos desde pos hasta end_marker; devuelve su posición."""
+            while data[pos:pos + 2] != end_marker:
+                if data[pos] != 0xFF or pos + 4 > len(data):
+                    raise ValueError
+                marker = data[pos + 1]
+                length = int.from_bytes(data[pos + 2:pos + 4], "big")
+                if marker == 0x52:  # COD: transformada en SPcod, tras Scod, SGcod (4) y 4 bytes
+                    transforms.append(data[pos + 13])
+                elif marker == 0x53:  # COC: igual, tras Ccoc (1 o 2 bytes) y Scoc
+                    transforms.append(data[pos + 9 + ccoc])
+                pos += 2 + length
+            return pos
+
+        pos = header(start + 2, b"\xff\x90")  # cabecera principal, hasta el primer SOT
+        while data[pos:pos + 2] == b"\xff\x90":  # cada tile-part: su cabecera hasta SOD
+            psot = int.from_bytes(data[pos + 6:pos + 10], "big")
+            header(pos + 12, b"\xff\x93")
+            if psot == 0:  # el último, hasta EOC
+                break
+            pos += psot
+    except (IndexError, ValueError):
+        return None
+    if not transforms or any(t not in (0, 1) for t in transforms):
+        return None
+    return 1 in transforms
+
+
+def _pil(pix):
+    return Image.frombytes(_PIL_MODES[pix.n], (pix.width, pix.height), pix.samples)
+
+
+def _jpeg_like(img, src):
+    """img en JPEG con las tablas de cuantización y el submuestreo de src (abierto con Pillow).
+
+    Progresivo y con Huffman optimizado: los dos sin pérdida. Submuestreo desconocido: 4:4:4.
+    """
+    kw = {"qtables": src.quantization, "optimize": True, "progressive": True}
+    if img.mode == "RGB":
+        sampling = JpegImagePlugin.get_sampling(src)
+        kw["subsampling"] = sampling if sampling >= 0 else 0
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", **kw)
+    return buf.getvalue()
+
+
+def _store(doc, xref, data, filter_name):
+    """Pone data como flujo de la imagen, con su filtro. Un JPEG, con capa Flate si ahorra
+    (como jpeg_flate.py)."""
+    if filter_name == "/DCTDecode":
+        wrapped = zlib.compress(data, 9)
+        if len(wrapped) < len(data):
+            data, filter_name = wrapped, "[/FlateDecode /DCTDecode]"
+    doc.update_stream(xref, data, compress=False)
+    doc.xref_set_key(xref, "Filter", filter_name)
+    doc.xref_set_key(xref, "DecodeParms", "null")
+    doc.xref_set_key(xref, "BitsPerComponent", "8")
+
+
+def _restore_raw(doc, xref, raw):
+    """Vuelve a la copia sin pérdida (Flate al guardar)."""
+    doc.update_stream(xref, raw)
+    doc.xref_set_key(xref, "DecodeParms", "null")
+
+
+def _same_colors(doc, xref, expected):
+    """¿La imagen xref, decodificada por MuPDF, tiene los colores de `expected` (Pillow)?"""
+    got = fitz.Pixmap(doc, xref)
+    if (got.n, got.width, got.height, got.alpha) != (len(expected.getbands()), *expected.size, 0):
+        return False
+    got = _pil(got)
+    diff = ImageStat.Stat(ImageChops.difference(expected, got)).mean
+    bias = [abs(a - b) for a, b in zip(ImageStat.Stat(expected).mean, ImageStat.Stat(got).mean)]
+    return max(diff) <= CMYK_MAX_MEAN_DIFF and max(bias) <= CMYK_MAX_BIAS
+
+
+def _encode_dct(doc, xref, original_xref, pix):
+    """Copia de una JPEG -> JPEG con la calidad del original (ver el comentario de la sección)."""
+    original = _original_jpeg(doc, original_xref)
+    img = _pil(pix)
+    src = None
+    if original is not None:
+        try:
+            src = Image.open(io.BytesIO(original))
+            src.load()  # valida el JPEG entero
+        except Exception:
+            src = None
+    if pix.n == 4:
+        # CMYK: solo con las tablas del original. Pillow escribe la marca Adobe (CMYK invertido);
+        # si MuPDF no lee los colores tal cual, se prueba con los valores invertidos y, si
+        # tampoco, Flate sin pérdida.
+        if src is None:
+            return False
+        raw = doc.xref_stream(xref)
+        for variant in (img, ImageChops.invert(img)):
+            _store(doc, xref, _jpeg_like(variant, src), "/DCTDecode")
+            if _same_colors(doc, xref, img):
+                return True
+        _restore_raw(doc, xref, raw)
+        return False
+    candidates = [pix.tobytes("jpg", jpg_quality=(original and jpeg_quality(original)) or DEFAULT_JPEG_QUALITY)]
+    if src is not None:
+        try:
+            candidates.append(_jpeg_like(img, src))
+        except Exception as e:  # p. ej. tablas que Pillow no acepta: queda la de MuPDF
+            print(f"Aviso en redact.py: JPEG con las tablas del original: {e}", file=sys.stderr)
+    _store(doc, xref, min(candidates, key=len), "/DCTDecode")
+    return True
+
+
+def _encode_jpx(doc, xref, original_xref, pix):
+    """Copia de un JPEG 2000: sin pérdida si el original lo era (o en duda); si no, 9/7."""
+    original = _original_jpx(doc, original_xref)
+    img = _pil(pix)
+    raw = doc.xref_stream(xref)
+    if original is None or jpx_reversible(original) is not False:
+        # Sin pérdida: JPEG 2000 reversible o Flate, lo que ocupe menos, con píxeles idénticos.
+        buf = io.BytesIO()
+        try:
+            img.save(buf, "JPEG2000", irreversible=False, no_jp2=True)
+        except Exception:
+            return False  # p. ej. un modo que Pillow no codifica en JPEG 2000: Flate
+        if len(buf.getvalue()) >= len(zlib.compress(raw, 6)):
+            return False
+        _store(doc, xref, buf.getvalue(), "/JPXDecode")
+        if fitz.Pixmap(doc, xref).samples == pix.samples:
+            return True
+        _restore_raw(doc, xref, raw)
+        return False
+    # Con pérdida (9/7): otra vez JPEG 2000 9/7, a la misma tasa de compresión (bytes sin
+    # comprimir / bytes del original). Con un escaneo de 20 páginas tarda lo mismo que pasarlo a
+    # JPEG q85 como antes (50-63 s frente a 60-66 s) y ocupa como la entrada (antes, +76 %).
+    ratio = len(raw) / len(original)
+    buf = io.BytesIO()
+    try:
+        img.save(buf, "JPEG2000", irreversible=True, quality_mode="rates", quality_layers=[ratio], no_jp2=True)
+    except Exception:
+        return False  # p. ej. un modo que Pillow no codifica en JPEG 2000: Flate
+    _store(doc, xref, buf.getvalue(), "/JPXDecode")
+    return True
+
+
 def _encode_jpeg(doc, xref, original_xref, original_filter):
-    """Imagen de 8 bits gris o RGB sin comprimir -> JPEG con la calidad del original."""
+    """Imagen de 8 bits gris, RGB o CMYK sin comprimir, copia de una JPEG o JPEG 2000 ->
+    codificada como su original (ver el comentario de la sección). False: queda en Flate."""
     pix = fitz.Pixmap(doc, xref)
-    if pix.alpha or pix.n not in (1, 3):
-        return False  # CMYK u otros: se queda sin pérdida (Flate)
+    if pix.alpha or pix.n not in _PIL_MODES:
+        return False  # otros espacios de color: se queda sin pérdida (Flate)
     if pix.color_count() <= MAX_LOSSLESS_COLORS:
         # Código de barras, QR o sello (o una Indexed que MuPDF ha pasado a RGB): sin pérdida,
         # aunque se haya emparejado con un JPEG (como en Comprimir, lossless_images.py).
         return False
-    quality = None
-    if "DCT" in original_filter:
-        try:
-            quality = jpeg_quality(doc.extract_image(original_xref)["image"])
-        except Exception:
-            quality = None
-    jpeg = pix.tobytes("jpg", jpg_quality=quality or DEFAULT_JPEG_QUALITY)
-    if "DCT" not in original_filter:
-        # JPEG 2000: sin calidad que copiar; si Flate sin pérdida ocupa menos, se queda en Flate.
-        raw = doc.xref_stream(xref)
-        if len(zlib.compress(raw, 6)) <= len(jpeg):
-            return False
-    wrapped = zlib.compress(jpeg, 9)
-    if len(wrapped) < len(jpeg):  # como jpeg_flate.py: la capa Flate, si ahorra
-        doc.update_stream(xref, wrapped, compress=False)
-        doc.xref_set_key(xref, "Filter", "[/FlateDecode /DCTDecode]")
-    else:
-        doc.update_stream(xref, jpeg, compress=False)
-        doc.xref_set_key(xref, "Filter", "/DCTDecode")
-    doc.xref_set_key(xref, "DecodeParms", "null")
-    doc.xref_set_key(xref, "BitsPerComponent", "8")
-    return True
+    if "JPX" in original_filter:
+        return _encode_jpx(doc, xref, original_xref, pix)
+    return _encode_dct(doc, xref, original_xref, pix)
 
 
 def recompress_redacted_images(doc, page, before):

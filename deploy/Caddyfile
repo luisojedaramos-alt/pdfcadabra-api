@@ -7,6 +7,25 @@
 	}
 }
 
+# Errores que genera Caddy y no la API: 502 si la API no responde (mientras se recrea su
+# contenedor en un despliegue, o si se cae) y 413 por encima de max_size. Sin cabeceras CORS la
+# web no puede leerlos y los muestra como un fallo de red (estado 0; incidencia del
+# 2026-10-15): llevan las mismas que la API para los orígenes de la web, que hay que mantener
+# iguales que ALLOWED_ORIGINS (server.js) y EXTRA_ALLOWED_ORIGINS (docker-compose.yml).
+(errores_cors) {
+	@web header_regexp Origin ^https://(pdfcadabra\.com|www\.pdfcadabra\.com|dev--pdfcadabra\.netlify\.app)$
+	header @web {
+		Access-Control-Allow-Origin {http.request.header.Origin}
+		Access-Control-Expose-Headers Retry-After
+	}
+	header {
+		-Server
+		Vary Origin
+		Cache-Control no-store
+		Content-Type "application/json; charset=utf-8"
+	}
+}
+
 api.pdfcadabra.com {
 	# Algo por encima de los 133 MB (100 del archivo en el plan Pro + 33 de margen del
 	# multipart en /v1/redact/apply: la lista de hallazgos, hasta 16 MB) que la API admite
@@ -20,4 +39,15 @@ api.pdfcadabra.com {
 	}
 	header -Server
 	reverse_proxy api:3000
+
+	# Mismo cuerpo que el 413 de la API.
+	handle_errors 413 {
+		import errores_cors
+		respond `{"error":"FILE_TOO_LARGE","message":"El archivo supera el máximo admitido."}` 413
+	}
+	handle_errors {
+		import errores_cors
+		header Retry-After 10
+		respond `{"code":"SERVICE_UNAVAILABLE","error":"El servicio no está disponible en este momento. Inténtalo de nuevo en unos segundos."}` {err.status_code}
+	}
 }

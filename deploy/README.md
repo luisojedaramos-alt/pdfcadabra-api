@@ -52,6 +52,11 @@ ssh pdfcadabra-clouding "cd /opt/pdfcadabra && rm -rf api.old && { [ ! -d api ] 
   && echo $REV > api/REVISION && docker compose -f api/deploy/docker-compose.yml up -d --build"
 ```
 
+Al recrear la API, el contenedor viejo deja de aceptar conexiones y termina lo que tenga en
+marcha antes de salir (hasta 600 s, `stop_grace_period`): `up -d` puede tardar eso. Mientras
+tanto y hasta que arranca el nuevo, Caddy responde 502 (con cabeceras CORS y `Retry-After`).
+Mejor desplegar sin tráfico.
+
 Si la versión cambia el `Caddyfile`, hay que reiniciar Caddy tras la rotación. El archivo
 está montado desde `api/deploy/Caddyfile` y, después del `mv api api.old`, el contenedor
 sigue leyendo el antiguo (ahora en `api.old`). Por eso `caddy reload` dentro del contenedor

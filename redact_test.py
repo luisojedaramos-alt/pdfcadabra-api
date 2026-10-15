@@ -572,6 +572,25 @@ class TamanoDeSalidaLote2d(unittest.TestCase):
         out = self.apply_zone(src)
         self.assertLessEqual(os.path.getsize(out), os.path.getsize(src) * 1.1)
 
+    def test_jpeg2000_5_3_truncado_no_crece(self):
+        """5/3 truncada por tasa (Pillow con quality_layers y su irreversible=False por defecto):
+        la cabecera dice reversible, pero tiene pérdida. Se recodificaba sin pérdida: ×2 en el
+        corpus del lote 2d."""
+        from PIL import Image, ImageDraw
+        src = tmp_path(self, "in.pdf")
+        # Texto en color sobre blanco (como el del corpus): truncado a tasa 20, recodificarlo sin
+        # pérdida ocupa unas 2,5 veces el original. (Una foto a tasa 20, solo un 9 % más.)
+        img = Image.new("RGB", (SCAN_W, SCAN_H), "white")
+        d = ImageDraw.Draw(img)
+        for i in range(50):
+            d.text((80, 60 + 32 * i), "juicio ordinario 123/2026 procurador letrado " * 2, fill=(20, 30, 120))
+        data = encode(img, "JPEG2000", quality_mode="rates", quality_layers=[20], no_jp2=True)
+        make_image_pdf(src, [[(data, "/JPXDecode", "/DeviceRGB", None)]])
+        self.assertIs(redact.jpx_reversible(data), True)
+        out = self.apply_zone(src)
+        self.assertIn("JPXDecode", first_image(out)[0])
+        self.assertLessEqual(os.path.getsize(out), os.path.getsize(src) * 1.1)
+
     def test_transformada_jpeg2000(self):
         from PIL import Image
         img = Image.new("RGB", (64, 64), (10, 120, 200))

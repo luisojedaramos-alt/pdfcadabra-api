@@ -458,7 +458,7 @@ def words_outside(words, zones, margin=1.0):
 # - JPEG 2000 sin pérdida (5/3 o en duda, jpx_reversible): JPEG 2000 sin pérdida o Flate, lo que
 #   ocupe menos, con píxeles idénticos. Con pérdida (9/7): JPEG 2000 9/7 a la misma tasa de
 #   compresión que el original. Antes, los dos a JPEG q85. Una 5/3 truncada por tasa también
-#   tiene pérdida, pero la cabecera no lo distingue: sale sin pérdida.
+#   tiene pérdida y la cabecera no lo distingue: se mide (JPX_TRUNCATED_RATIO).
 
 # Tabla de cuantización de luminancia de referencia (IJG, calidad 50).
 _STD_LUMA_SUM = sum((
@@ -555,6 +555,15 @@ def _encode_g4(doc, xref, width, height):
 
 
 _PIL_MODES = {1: "L", 3: "RGB", 4: "CMYK"}
+
+# JPEG 2000 5/3 (reversible según su cabecera) truncado por tasa: también tiene pérdida, y la
+# cabecera no lo distingue. Se mide (decisión de Luis, 2026-10-16): si la copia censurada,
+# codificada sin pérdida, ocupa más de JPX_TRUNCATED_RATIO veces el original, el original no era
+# sin pérdida y se codifica 5/3 a su misma tasa de compresión. Un sin pérdida real recodificado
+# sin pérdida ocupa más o menos lo mismo (×1,00 con OpenJPEG; con zonas en negro, menos); uno
+# truncado, con texto sobre blanco a tasa 20, ×2,5-4. Por debajo del umbral se queda sin
+# pérdida: un truncado de foto a tasa 20 da ×1,09.
+JPX_TRUNCATED_RATIO = 1.5
 
 # Comprobación de colores de una JPEG CMYK recodificada (_same_colors), por canal y en niveles
 # de 0 a 255, entre la copia censurada y su JPEG decodificada por MuPDF: diferencia media
@@ -720,27 +729,33 @@ def _encode_jpx(doc, xref, original_xref, pix):
     original = _original_jpx(doc, original_xref)
     img = _pil(pix)
     raw = doc.xref_stream(xref)
-    if original is None or jpx_reversible(original) is not False:
+    reversible = original is None or jpx_reversible(original) is not False
+    if reversible:
         # Sin pérdida: JPEG 2000 reversible o Flate, lo que ocupe menos, con píxeles idénticos.
         buf = io.BytesIO()
         try:
             img.save(buf, "JPEG2000", irreversible=False, no_jp2=True)
         except Exception:
             return False  # p. ej. un modo que Pillow no codifica en JPEG 2000: Flate
-        if len(buf.getvalue()) >= len(zlib.compress(raw, 6)):
+        lossless = buf.getvalue()
+        if original is None or len(lossless) <= JPX_TRUNCATED_RATIO * len(original):
+            if len(lossless) >= len(zlib.compress(raw, 6)):
+                return False
+            _store(doc, xref, lossless, "/JPXDecode")
+            if fitz.Pixmap(doc, xref).samples == pix.samples:
+                return True
+            _restore_raw(doc, xref, raw)
             return False
-        _store(doc, xref, buf.getvalue(), "/JPXDecode")
-        if fitz.Pixmap(doc, xref).samples == pix.samples:
-            return True
-        _restore_raw(doc, xref, raw)
-        return False
-    # Con pérdida (9/7): otra vez JPEG 2000 9/7, a la misma tasa de compresión (bytes sin
-    # comprimir / bytes del original). Con un escaneo de 20 páginas tarda lo mismo que pasarlo a
-    # JPEG q85 como antes (50-63 s frente a 60-66 s) y ocupa como la entrada (antes, +76 %).
+        # 5/3 truncado por tasa (ver JPX_TRUNCATED_RATIO): 5/3 a su misma tasa.
+    # Con pérdida: otra vez JPEG 2000, con la transformada del original (9/7, o 5/3 truncada) y
+    # a su misma tasa de compresión (bytes sin comprimir / bytes del original). Con un escaneo
+    # 9/7 de 20 páginas tarda lo mismo que pasarlo a JPEG q85 como antes (50-63 s frente a
+    # 60-66 s) y ocupa como la entrada (antes, +76 %).
     ratio = len(raw) / len(original)
     buf = io.BytesIO()
     try:
-        img.save(buf, "JPEG2000", irreversible=True, quality_mode="rates", quality_layers=[ratio], no_jp2=True)
+        img.save(buf, "JPEG2000", irreversible=not reversible, quality_mode="rates",
+                 quality_layers=[ratio], no_jp2=True)
     except Exception:
         return False  # p. ej. un modo que Pillow no codifica en JPEG 2000: Flate
     _store(doc, xref, buf.getvalue(), "/JPXDecode")

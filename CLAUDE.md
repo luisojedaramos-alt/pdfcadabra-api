@@ -220,8 +220,13 @@
     tile-parts). 5/3 o en duda -> sin pérdida: JPEG 2000 reversible o Flate, lo que ocupe menos,
     con píxeles idénticos. 9/7 -> JPEG 2000 9/7 a la misma tasa de compresión (opción A: con 20
     páginas, 50-63 s frente a 60-66 s de pasarlo a JPEG). Antes, los dos a JPEG q85.
-    Limitación: una 5/3 truncada por tasa también tiene pérdida, pero la cabecera no lo
-    distingue y sale sin pérdida (`color-jpx-25mb` de magic: 26,4 -> 52,4 MB).
+    Una 5/3 truncada por tasa (Pillow con `quality_layers` y sin `irreversible=True`) también
+    tiene pérdida y la cabecera no lo distingue (con el `color-jpx-25mb` de magic, sin pérdida:
+    26,4 -> 52,4 MB). Decisión de Luis (2026-10-16), por medición: si la copia codificada sin
+    pérdida ocupa más de `JPX_TRUNCATED_RATIO` (1,5) veces el original, se codifica 5/3 a su
+    misma tasa. Un sin pérdida real da ×1,00; un truncado de texto sobre blanco a tasa 20,
+    ×2,5-4; uno de foto a tasa 20, ×1,09 (queda sin pérdida). Entre ×1,1 y ×1,5 la salida puede
+    crecer hasta un 50 %.
   - 1 bit en CCITT G4 sin pérdida (con comprobación de ida y vuelta), también los JBIG2. El resto,
     sin pérdida (Flate). La copia se empareja con su original por ancho, alto y bits por componente
   (MuPDF cambia el xref y el nombre del recurso) y, si varias coinciden, por su posición en la

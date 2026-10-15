@@ -291,6 +291,14 @@ const heavyGate = async (req, res, next) => {
 // Borrados registrados con cleanupOnClose (idempotentes).
 const runAbortCleanups = (req) => (req.abortCleanups || []).forEach((cleanup) => cleanup());
 
+// Envío de un documento del usuario (resultado de Comprimir o de Anonimizar): Cache-Control:
+// no-store y sin ETag ni Last-Modified, para que ninguna caché intermedia ni del navegador lo
+// guarde (sendFile ponía por defecto `public, max-age=0`, ETag y Last-Modified).
+const sendDocument = (res, filePath, callback) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(filePath, { cacheControl: false, etag: false, lastModified: false }, callback);
+};
+
 // Cliente desconectado sin respuesta: mata los procesos hijos en marcha de la petición
 // (gs, python), libera su hueco y marca la petición para que no se lance el siguiente paso
 // de la cadena (jpeg_flate.py tras gs, la red de seguridad, verify). Sin esto, gs o
@@ -553,7 +561,7 @@ app.post('/v1/redact/apply', requireOrigin, checkUploadSize(APPLY_FIELDS), limit
 
             // Envío del resultado y borrado de los temporales al terminar el envío (con
             // éxito o con error; no hay confirmación de que el navegador lo guardase)
-            res.sendFile(outputPath, (err) => {
+            sendDocument(res, outputPath, (err) => {
                 if (err && !res.headersSent) {
                     console.error("Error enviando el documento censurado:", describeError(err));
                     res.status(500).json({ error: 'Error enviando el documento censurado.' });
@@ -761,7 +769,7 @@ app.post('/v1/compress', requireOrigin, checkUploadSize(FIELDS), limitPerClient,
         res.type('application/pdf');
         // Envío del resultado y borrado de los temporales al terminar el envío (con
         // éxito o con error; no hay confirmación de que el navegador lo guardase)
-        res.sendFile(compressed ? resultPath : inputPath, () => cleanupAll());
+        sendDocument(res, compressed ? resultPath : inputPath, () => cleanupAll());
     }
 
     // Antes de Ghostscript, una sola vez para las dos pasadas: lossless_images.py sustituye

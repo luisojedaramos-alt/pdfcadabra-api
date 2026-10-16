@@ -139,6 +139,19 @@
   patrones, glifos Type3), fuentes ni sus CMaps, ni imágenes y perfiles ICC (binarios: un
   término corto saldría por azar). Coste medido con 300 págs: barrido 0,04 s, texto oculto
   1,2 s. Al log solo van los sitios (`form_fields`, `outline`...), nunca los términos.
+- Verificación por render (`zones_not_black`, decisión de Luis, 2026-10-17): en las páginas
+  donde una zona toca una imagen (los píxeles no se pueden buscar como el texto), la página
+  se renderiza entera a 36 ppp en gris con /Rotate 0, y cada zona, recortada a lo visible y
+  reducida 1 px, debe tener todos sus píxeles a 60 o menos (`RENDER_DPI`,
+  `RENDER_MAX_GRAY`); si no, `leaks: ["render_not_black"]` y 422 sin salida. Una zona de
+  menos de unos 4 pt no deja píxeles enteros y no se comprueba. Motivo: con /Rotate y la
+  CropBox desplazada el negro salía lejos de su zona (ver «Coordenadas con /Rotate»). Tests en
+  `redact_test.py` (`VerificacionPorRender`). Es una condición más: `page_text` sigue igual.
+  Coste medido en local (corpus del lote 2d, sin falsos positivos en los 13 archivos): 0,1-3,4 s
+  con JPEG, CCITT y JBIG2 (escaneos de 50 MB, unos 2 s: +7 % de apply), y 7-14 s con JPEG 2000
+  (renderizar obliga a decodificarlo). Peor caso, el 5/3 truncado de 51,5 MB: +14 s, apply
+  98 -> 116 s en local, unos 151 s estimados en producción (×1,3), por debajo de 180. Un
+  vectorial sin imágenes no se renderiza (300 págs.: 0,3 s).
 - Texto oculto en `apply` (decisión de Luis, 2026-10-07, fase 2): las palabras ocultas que
   forman un término se censuran solas, porque el usuario no las ve. Se buscan antes de
   censurar (`hidden_term_rects`, igual que la verificación) y se borran en una pasada aparte

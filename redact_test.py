@@ -922,5 +922,65 @@ class CensuraConRotateYCropBox(unittest.TestCase):
                     self.assertIsNone(diff.point(lambda v: 255 if v > 30 else 0).getbbox(), (name, rotation))
 
 
+class VerificacionPorRender(unittest.TestCase):
+    """Una zona que toca una imagen tiene que verse negra en la salida: si no (como cuando el
+    negro salía desplazado con /Rotate y la CropBox desplazada), 422 y nada descargado. La
+    verificación de texto no lo ve: los píxeles del escaneo no se pueden buscar."""
+
+    def test_zona_sobre_imagen_sin_negro_no_se_entrega(self):
+        from unittest import mock
+        for name, rotation in (("cropbox en el origen", 0), ("desplazada", 90), ("se sale por arriba", 270)):
+            for manual in (False, True):
+                with self.subTest(geometria=name, rotate=rotation, manual=manual):
+                    src, out = tmp_path(self, "in.pdf"), tmp_path(self, "out.pdf")
+                    term, seen = make_rotated_pdf(src, *GEOMETRIES[name], rotation, scan=True)
+                    items = manual_items(term, seen) if manual else search_items(src, TERM)
+                    with mock.patch.object(redact, "paint_zones"):  # el negro no se pinta
+                        report = redact.apply(src, out, items)
+                    self.assertFalse(report["verified"], report)
+                    self.assertEqual(report["leaks"], ["render_not_black"])
+                    self.assertFalse(os.path.exists(out))
+
+    def test_render_es_una_condicion_aparte_de_page_text(self):
+        """render_not_black se suma a page_text, no lo sustituye: una zona sobre una imagen con
+        el texto visible y sin negro da las dos fugas; con el texto sobre blanco, solo page_text."""
+        import io
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("L", (100, 100), 200).save(buf, "PNG")
+        zone = fitz.Rect(60, 60, 200, 90)
+        for with_image, expected in ((True, ["page_text", "render_not_black"]), (False, ["page_text"])):
+            with self.subTest(imagen=with_image):
+                path = tmp_path(self, "out.pdf")
+                doc = fitz.open()
+                page = doc.new_page()
+                if with_image:
+                    page.insert_image(fitz.Rect(0, 0, 300, 300), stream=buf.getvalue())
+                page.insert_text((70, 80), TERM, fontsize=14)
+                doc.save(path)
+                doc.close()
+                self.assertEqual(redact.verify_redaction(path, {0: [zone]}, {TERM}), expected)
+
+    def test_zona_pintada_pasa(self):
+        src, out = tmp_path(self, "in.pdf"), tmp_path(self, "out.pdf")
+        make_rotated_pdf(src, *GEOMETRIES["desplazada"], 90, scan=True)
+        report = redact.apply(src, out, search_items(src, TERM))
+        self.assertTrue(report["verified"], report)
+
+    def test_zona_demasiado_pequena_no_se_comprueba(self):
+        """Menos de unos 4 pt: a 36 ppp no le queda ningún píxel entero tras reducirla 1 px."""
+        doc = fitz.open()
+        page = doc.new_page()
+        from PIL import Image
+        import io
+        buf = io.BytesIO()
+        Image.new("L", (100, 100), 255).save(buf, "PNG")
+        page.insert_image(fitz.Rect(0, 0, 300, 300), stream=buf.getvalue())
+        self.assertTrue(redact.zones_not_black(page, [fitz.Rect(50, 50, 100, 100)]))
+        self.assertFalse(redact.zones_not_black(page, [fitz.Rect(50, 50, 53, 53)]))
+        self.assertFalse(redact.zones_not_black(page, [fitz.Rect(400, 400, 500, 500)]))  # sin imagen
+        doc.close()
+
+
 if __name__ == "__main__":
     unittest.main()

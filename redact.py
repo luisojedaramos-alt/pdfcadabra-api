@@ -1563,6 +1563,46 @@ def objects_with_terms(doc, terms):
     return False
 
 
+# Comprobación por render de las zonas sobre imágenes (zones_not_black): resolución y gris
+# máximo (0 negro, 255 blanco) de los píxeles que caen enteros dentro de la zona.
+RENDER_DPI = 36
+RENDER_MAX_GRAY = 60
+
+
+def zones_not_black(page, zones):
+    """¿Alguna zona que toca una imagen no se ve negra? Solo en las páginas donde una zona
+    toca una imagen: en el texto ya mira la geometría chars_in_zones, pero los píxeles de una
+    imagen no se pueden buscar. (Con /Rotate y la CropBox desplazada, el negro llegó a salir
+    lejos de su zona: fix/censura-rotate-cropbox, 2026-10-17.)
+
+    Página entera a RENDER_DPI en gris, con /Rotate 0 (sin las matrices de PyMuPDF que fallan
+    con rotación, ver paint_rects): cada zona, recortada a lo visible y reducida 1 px, debe
+    tener todos sus píxeles a RENDER_MAX_GRAY o menos. Una zona que se queda sin píxeles
+    enteros a esa resolución (menos de unos 4 pt) no se puede comprobar así.
+    """
+    if not zones:
+        return False
+    with _unrotated(page):
+        visible = page.rect
+        images = [fitz.Rect(i["bbox"]) for i in page.get_image_info()]
+        targets = [z & visible for z in zones if any(z.intersects(b) for b in images)]
+        targets = [t for t in targets if not t.is_empty]
+        if not targets:
+            return False
+        pix = page.get_pixmap(dpi=RENDER_DPI, colorspace=fitz.csGRAY, alpha=False)
+    scale = RENDER_DPI / 72
+    samples, stride = pix.samples, pix.stride
+    for t in targets:
+        x0 = max(math.ceil(t.x0 * scale + 1) - pix.x, 0)
+        y0 = max(math.ceil(t.y0 * scale + 1) - pix.y, 0)
+        x1 = min(math.floor(t.x1 * scale - 1) - pix.x, pix.width)
+        y1 = min(math.floor(t.y1 * scale - 1) - pix.y, pix.height)
+        for y in range(y0, y1):
+            if x0 < x1 and max(samples[y * stride + x0:y * stride + x1]) > RENDER_MAX_GRAY:
+                return True
+    return False
+
+
 def verify_redaction(path, zones_by_page, terms):
     """Busca de nuevo en el PDF de salida. Devuelve la lista de sitios con fugas.
 
@@ -1574,6 +1614,7 @@ def verify_redaction(path, zones_by_page, terms):
       usuario no lo ha visto, así que no ha podido decidir dejarlo.
     - Campos, anotaciones, enlaces, metadatos (Info y XMP), marcadores y adjuntos: no
       puede aparecer ningún término censurado.
+    - Zonas que tocan una imagen: deben verse negras en el render (zones_not_black).
     Nunca devuelve los términos: el resultado va al log.
     """
     leaks = set()
@@ -1583,6 +1624,8 @@ def verify_redaction(path, zones_by_page, terms):
         for page in doc:
             if chars_in_zones(page, zones_by_page.get(page.number)):
                 leaks.add("page_text")
+            if zones_not_black(page, zones_by_page.get(page.number)):
+                leaks.add("render_not_black")
             if _contains_term(hidden_page_text(page, all_layers[page.number]), terms):
                 leaks.add("hidden_text")
             for w in page.widgets():

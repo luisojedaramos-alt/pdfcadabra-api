@@ -32,12 +32,14 @@
   (ver Límites por plan): cola 180 s, Comprimir 180 s en total (+30 s de
   verificación), Anonimizar 240 s por proceso. Health check de Docker a `/health`
   cada 30 s.
-- Comprobado en el servidor el 2026-10-15 (`docker inspect` del contenedor,
-  revisión e64300a). Revisión actual en producción: e64300a (desplegada el
-  2026-10-15 a las 23:33, parada ordenada, errores de Caddy con CORS y descargas
-  `no-store`; Caddy reiniciado, mismo certificado). Vuelta atrás: imagen
-  `pdfcadabra-api:rollback-c4e54da` y `/opt/pdfcadabra/api.old` (c4e54da). Ese fue el
-  último despliegue que cortó a los 10 s: desde e64300a el contenedor espera
+- Comprobado en el servidor el 2026-10-16 (`docker inspect` del contenedor,
+  revisión d479837). Revisión actual en producción: d479837 (desplegada el
+  2026-10-16 a las 23:32, lote 2d: la salida de Anonimizar ya no pesa más que la
+  entrada; imagen nueva con Pillow 12.3.0, tests pasados dentro de ella antes de
+  recrear; Caddy sin tocar). Vuelta atrás: imagen `pdfcadabra-api:rollback-e64300a` y
+  `/opt/pdfcadabra/api.old` (e64300a). Primer despliegue con parada ordenada: el
+  contenedor viejo recibió solo SIGTERM y salió con 0, sin SIGKILL (`docker events`).
+  c4e54da fue el último despliegue que cortó a los 10 s
   (`stop_timeout` 600 comprobado). Al reiniciar Caddy salen siempre los avisos
   `HTTP/2 (y HTTP/3) skipped because it requires TLS` en `:80` (por `protocols h1 h2`; ya
   salían antes).

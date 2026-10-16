@@ -229,7 +229,12 @@
     pérdida ocupa más de `JPX_TRUNCATED_RATIO` (1,5) veces el original, se codifica 5/3 a su
     misma tasa. Un sin pérdida real da ×1,00; un truncado de texto sobre blanco a tasa 20,
     ×2,5-4; uno de foto a tasa 20, ×1,09 (queda sin pérdida). Entre ×1,1 y ×1,5 la salida puede
-    crecer hasta un 50 %.
+    crecer hasta un 50 %. Peor caso de tiempo (medido en local el 2026-10-16): un 5/3 truncado de
+    51,5 MB (39 págs. de texto sobre blanco a tasa 20, 1.974 hallazgos, todas las páginas pasan
+    por la medición sin pérdida y la recodificación a su tasa): apply 102-107 s, unos 136 s
+    estimados en producción (×1,3), por debajo del 75 % del tope de 240 s. Por eso no hay una
+    detección más barata (p. ej., medir una franja y extrapolar): revisarlo si sube el tope de
+    tamaño o el servidor es más lento.
   - 1 bit en CCITT G4 sin pérdida (con comprobación de ida y vuelta), también los JBIG2. El resto,
     sin pérdida (Flate). La copia se empareja con su original por ancho, alto y bits por componente
   (MuPDF cambia el xref y el nombre del recurso) y, si varias coinciden, por su posición en la

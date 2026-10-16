@@ -765,5 +765,162 @@ class PatronesNoValidos(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
+# Páginas con /Rotate y CropBox desplazada a la vez (fallo encontrado en la QA de la web,
+# 2026-10-16): el texto y los píxeles se borraban en su sitio, pero la caja negra salía
+# desplazada por el origen de la CropBox o fuera de la página. (MediaBox, CropBox) en espacio
+# de usuario; la CropBox que se sale de la MediaBox se recorta con ella, como en pdf.js.
+GEOMETRIES = {
+    "cropbox en el origen": ("[0 0 600 800]", "[0 0 600 800]"),
+    "desplazada": ("[0 0 600 800]", "[50 100 450 700]"),
+    "negativa": ("[-100 -150 500 650]", "[-80 -120 400 600]"),
+    "se sale por arriba": ("[0 0 600 800]", "[300 400 900 1100]"),
+    "se sale por abajo": ("[0 0 600 800]", "[-50 -60 400 600]"),
+}
+TERM_SIZE = 20
+DATA_GRAY = 60  # el «texto» del escaneo, en la imagen; el papel es 200
+
+
+def _box(s):
+    return fitz.Rect([float(v) for v in s.strip("[]").split()])
+
+
+def make_rotated_pdf(path, mediabox, cropbox, rotation, scan):
+    """Página con el término en espacio de usuario, a 60 pt del borde izquierdo y 80 del
+    superior de lo que se ve. scan: imagen gris de la MediaBox (1 px por punto) con un bloque
+    oscuro bajo el término y el término como capa OCR invisible. Devuelve el rectángulo del
+    término en espacio de usuario (x0, y0, x1, y1 con la y hacia arriba)."""
+    media, crop = _box(mediabox), _box(cropbox)
+    seen = media & crop  # lo que se ve: CropBox recortada a la MediaBox (page.view en pdf.js)
+    ux, uy = seen.x0 + 60, seen.y1 - 80
+    width = fitz.get_text_length(TERM, "helv", TERM_SIZE)
+    term = (ux, uy - 5, ux + width, uy + 15)
+    doc = fitz.open()
+    page = doc.new_page()
+    doc.xref_set_key(page.xref, "MediaBox", mediabox)
+    doc.xref_set_key(page.xref, "CropBox", cropbox)
+    font = doc.get_new_xref()
+    doc.update_object(font, "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>")
+    resources = f"/Font<</F1 {font} 0 R>>"
+    content = f"BT {3 if scan else 0} Tr /F1 {TERM_SIZE} Tf {ux} {uy} Td ({TERM}) Tj ET"
+    if scan:
+        from PIL import Image, ImageDraw
+        w, h = int(media.width), int(media.height)
+        img = Image.new("L", (w, h), 200)
+        # Píxel (columna, fila) = usuario (media.x0 + columna, media.y1 - fila).
+        ImageDraw.Draw(img).rectangle([term[0] - media.x0, media.y1 - term[3],
+                                       term[2] - media.x0, media.y1 - term[1]], fill=DATA_GRAY)
+        im = doc.get_new_xref()
+        doc.update_object(im, f"<</Type/XObject/Subtype/Image/Width {w}/Height {h}"
+                              "/ColorSpace/DeviceGray/BitsPerComponent 8>>")
+        doc.update_stream(im, img.tobytes())
+        resources += f"/XObject<</Im0 {im} 0 R>>"
+        content = f"q {w} 0 0 {h} {media.x0} {media.y0} cm /Im0 Do Q " + content
+    c = doc.get_new_xref()
+    doc.update_object(c, "<<>>")
+    doc.update_stream(c, content.encode())
+    doc.xref_set_key(page.xref, "Contents", f"{c} 0 R")
+    doc.xref_set_key(page.xref, "Resources", f"<<{resources}>>")
+    doc.xref_set_key(page.xref, "Rotate", str(rotation))
+    doc.save(path)
+    doc.close()
+    return term, seen
+
+
+def manual_items(term, seen, margin=2):
+    """Censura manual como la manda la web (viewportRectToBackend de pdf-coords.ts): página sin
+    girar, origen arriba a la izquierda de lo que se ve y la y hacia abajo."""
+    x0, y0, x1, y1 = term
+    rect = [x0 - margin - seen.x0, seen.y1 - y1 - margin, x1 + margin - seen.x0, seen.y1 - y0 + margin]
+    return [{"id": "m0", "page": 0, "text": "Zona manual (Pág. 1)", "category": redact.MANUAL_CATEGORY,
+             "rect": rect}]
+
+
+def rendered(path):
+    """La página como se ve (con /Rotate y la CropBox), en gris a 72 ppp."""
+    from PIL import Image
+    pix = fitz.open(path)[0].get_pixmap(dpi=72, colorspace=fitz.csGRAY)
+    return Image.frombytes("L", (pix.width, pix.height), pix.samples)
+
+
+def dark_bbox(img, below):
+    return img.point(lambda v: 255 if v < below else 0).getbbox()
+
+
+class CensuraConRotateYCropBox(unittest.TestCase):
+    """La caja negra tapa el término donde se ve, y en un escaneo los píxeles de la imagen bajo
+    el término quedan destruidos, en las 4 rotaciones con la CropBox desplazada."""
+
+    def check(self, scan, manual):
+        for name, (mediabox, cropbox) in GEOMETRIES.items():
+            for rotation in (0, 90, 180, 270):
+                with self.subTest(geometria=name, rotate=rotation):
+                    src, out = tmp_path(self, "in.pdf"), tmp_path(self, "out.pdf")
+                    term, seen = make_rotated_pdf(src, mediabox, cropbox, rotation, scan)
+                    # Dónde se ve el término (o el bloque oscuro del escaneo) antes de censurar.
+                    where = dark_bbox(rendered(src), 128)
+                    self.assertIsNotNone(where)
+                    items = manual_items(term, seen) if manual else search_items(src, TERM)
+                    self.assertEqual(len(items), 1)
+                    report = redact.apply(src, out, items)
+                    self.assertTrue(report["verified"], report)
+                    self.assertEqual(report["failed"], [])
+                    after = rendered(out)
+                    # a) Todo lo que se veía del término queda negro...
+                    covered = after.crop(where).point(lambda v: 255 if v < 40 else 0)
+                    self.assertGreater(sum(covered.histogram()[255:]) / (covered.width * covered.height), 0.98,
+                                       f"el término se ve en {where}; negro en {dark_bbox(after, 40)}")
+                    # ...y el negro está en su sitio: no se sale más de 12 px (la zona de la
+                    # búsqueda es la línea entera, algo más alta que las letras).
+                    black = dark_bbox(after, 40)
+                    self.assertTrue((fitz.Rect(where) + (-12, -12, 12, 12)).contains(fitz.Rect(black)), (where, black))
+                    if scan:
+                        # b) Ningún píxel del dato queda en la imagen de la salida.
+                        doc = fitz.open(out)
+                        images = doc[0].get_images()
+                        self.assertEqual(len(images), 1)
+                        samples = fitz.Pixmap(doc, images[0][0]).samples
+                        doc.close()
+                        self.assertEqual(samples.count(DATA_GRAY), 0)
+
+    def test_texto_con_la_busqueda(self):
+        self.check(scan=False, manual=False)
+
+    def test_texto_con_censura_manual(self):
+        self.check(scan=False, manual=True)
+
+    def test_escaneo_con_la_busqueda(self):
+        self.check(scan=True, manual=False)
+
+    def test_escaneo_con_censura_manual(self):
+        self.check(scan=True, manual=True)
+
+    def test_relleno_repintado_en_su_sitio(self):
+        """Una celda de color bajo el término: REMOVE_IF_TOUCHED la quita y restore_fills la
+        repinta (también con PyMuPDF): debe volver a su sitio."""
+        for name, (mediabox, cropbox) in GEOMETRIES.items():
+            for rotation in (0, 90, 180, 270):
+                with self.subTest(geometria=name, rotate=rotation):
+                    src, out = tmp_path(self, "in.pdf"), tmp_path(self, "out.pdf")
+                    term, seen = make_rotated_pdf(src, mediabox, cropbox, rotation, scan=False)
+                    doc = fitz.open(src)
+                    page = doc[0]
+                    x0, y0, x1, y1 = term
+                    cell = f"q 0.6 0.8 1 rg {x0 - 30} {y0 - 20} {x1 - x0 + 60} {y1 - y0 + 40} re f Q\n".encode()
+                    c = page.get_contents()[0]
+                    doc.update_stream(c, cell + doc.xref_stream(c))
+                    doc.saveIncr()
+                    doc.close()
+                    before = rendered(src)
+                    report = redact.apply(src, out, search_items(src, TERM))
+                    self.assertTrue(report["verified"], report)
+                    after = rendered(out)
+                    black = fitz.Rect(dark_bbox(after, 40))
+                    # Fuera del negro (y de su borde), la página se ve igual que antes.
+                    from PIL import ImageChops
+                    diff = ImageChops.difference(before, after)
+                    diff.paste(0, tuple(int(v) for v in black + (-2, -2, 2, 2)))
+                    self.assertIsNone(diff.point(lambda v: 255 if v > 30 else 0).getbbox(), (name, rotation))
+
+
 if __name__ == "__main__":
     unittest.main()

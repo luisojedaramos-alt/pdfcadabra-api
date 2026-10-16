@@ -1,4 +1,5 @@
 import bisect
+import contextlib
 import io
 import json
 import math
@@ -357,6 +358,19 @@ def _word_key(word):
     return (text, round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1))
 
 
+def unrotated_rect(page):
+    """Lo que se ve de la página (CropBox recortada a la MediaBox), sin girar: el espacio de
+    search_for, get_text, get_drawings y add_redact_annot, y de los rectángulos de la web.
+
+    No sirve page.rect * page.derotation_matrix: con /Rotate, PyMuPDF 1.28.2 calcula esa
+    matriz con la CropBox sin recortar, y con una CropBox que se sale de la MediaBox la zona
+    salía desplazada (un hallazgo visible se daba por fuera de la página). page.rect sí es
+    correcto: es el mismo rectángulo, girado y en el origen.
+    """
+    w, h = page.rect.width, page.rect.height
+    return fitz.Rect(0, 0, h, w) if page.rotation % 180 else fitz.Rect(0, 0, w, h)
+
+
 def hidden_words(page_visible, page_all):
     """Palabras de la página que no se ven, como [(texto, Rect)]: fuera del CropBox o del
     MediaBox, desplazadas fuera de la página o en una capa OCG apagada. `page_all` es la
@@ -365,10 +379,10 @@ def hidden_words(page_visible, page_all):
 
     Cada palabra visible (misma posición y texto) descuenta una de `page_all`; lo que queda
     es el texto oculto, en el orden de la página. Las palabras llegan sin girar: la zona
-    visible es page.rect * derotation_matrix (con page.rect, en una página a 90 o 270 grados
-    el texto visible de abajo contaba como oculto).
+    visible es unrotated_rect (con page.rect, en una página a 90 o 270 grados el texto
+    visible de abajo contaba como oculto).
     """
-    shown = page_visible.rect * page_visible.derotation_matrix
+    shown = unrotated_rect(page_visible)
     visible = Counter(_word_key(w) for w in page_visible.get_text("words", clip=shown))
     hidden = []
     for w in page_all.get_text("words", clip=fitz.INFINITE_RECT(), flags=_ALL_TEXT_FLAGS):
@@ -1198,21 +1212,59 @@ def _path_rects(items):
     return [fitz.Rect(min(xs), min(ys), max(xs), max(ys))]
 
 
+@contextlib.contextmanager
+def _unrotated(page):
+    """La página con /Rotate 0 mientras dura el bloque (al salir, la rotación de antes)."""
+    rotation = page.rotation
+    if rotation:
+        page.set_rotation(0)
+    try:
+        yield page
+    finally:
+        if rotation:
+            page.set_rotation(rotation)
+
+
+def paint_rects(page, fills, overlay=True):
+    """Pinta rectángulos lisos dados sin girar (como los de search_for): fills es
+    [(rects, color, opacidad, con borde)]; encima de todo o, con overlay=False, debajo.
+
+    Con /Rotate 0 mientras se dibuja: con otra rotación, PyMuPDF 1.28.2 pasa a espacio de
+    usuario con Matrix(1, 0, 0, -1, 0, alto de la CropBox) (Page.transformation_matrix), que
+    no tiene en cuenta el origen de la CropBox, y con una CropBox desplazada respecto a la
+    MediaBox el rectángulo salía desplazado o fuera de la página. Le pasaba al negro de la
+    censura (apply_redactions lo pinta así) y a los rellenos repintados. Con 0 usa la matriz
+    de MuPDF, que sí lo tiene en cuenta.
+    """
+    with _unrotated(page):
+        shape = page.new_shape()
+        for rects, color, opacity, border in fills:
+            for r in rects:
+                shape.draw_rect(r)
+            if border:
+                shape.finish(fill=color, color=color, fill_opacity=opacity)
+            else:
+                shape.finish(fill=color, color=None, fill_opacity=opacity, width=0)
+        shape.commit(overlay=overlay)
+
+
+# El negro de la censura, como lo pintaba apply_redactions: relleno y borde de 1 pt.
+BLACK = (0, 0, 0)
+
+
+def paint_zones(page, zones):
+    paint_rects(page, [(zones, BLACK, 1, True)])
+
+
 def _content_bboxlog(page):
     """Como page.get_bboxlog() (orden de dibujo, sin girar), pero solo del contenido de la
     página: get_bboxlog incluye las anotaciones, y la de censura que ya hemos puesto
     parecería dibujada encima de todo lo que toca."""
-    rotation = page.rotation
-    if rotation:
-        page.set_rotation(0)
     log = []
-    try:
+    with _unrotated(page):
         dev = fitz.JM_new_bbox_device(log, False)
         _m.fz_run_page_contents(page.this, dev, _m.FzMatrix(), _m.FzCookie())
         _m.fz_close_device(dev)
-    finally:
-        if rotation:
-            page.set_rotation(rotation)
     return log
 
 
@@ -1309,17 +1361,11 @@ def restore_fills(page, saved, zones):
         fills = [f for f in missing if f.over == over]
         if not fills:
             continue
-        shape = page.new_shape()
-        for f in fills:
-            for r in f.rects:
-                shape.draw_rect(r)
-            shape.finish(fill=f.color, color=None, fill_opacity=f.opacity, width=0)
+        paints = [(f.rects, f.color, f.opacity, False) for f in fills]
         if over:
-            for z in zones:
-                if any(z.intersects(r) for f in fills for r in f.rects):
-                    shape.draw_rect(z)
-                    shape.finish(fill=(0, 0, 0), color=None, width=0)
-        shape.commit(overlay=over)
+            touched = [z for z in zones if any(z.intersects(r) for f in fills for r in f.rects)]
+            paints.append((touched, BLACK, 1, False))
+        paint_rects(page, paints, overlay=over)
     return len(missing)
 
 
@@ -1737,7 +1783,7 @@ def item_zone(doc, item):
     if x0 >= x1 or y0 >= y1:
         raise ValueError("rect invertido o vacío")
     rect = fitz.Rect(coords)
-    if not rect.intersects(page.rect * page.derotation_matrix):
+    if not rect.intersects(unrotated_rect(page)):
         raise ValueError("rect fuera de la página")
     return page, rect
 
@@ -1777,14 +1823,15 @@ def apply(input_path, output_path, items):
     for item in items:
         try:
             page, rect = item_zone(doc, item)
-            # Forzamos opacidad absoluta en el relleno
-            page.add_redact_annot(rect, fill=(0, 0, 0))
+            # Sin relleno: el negro lo pinta paint_zones tras apply_redactions (el de
+            # PyMuPDF salía desplazado con /Rotate y la CropBox desplazada).
+            page.add_redact_annot(rect, fill=False)
             zones_by_page.setdefault(page.number, []).append(rect)
             applied_count += 1
         except Exception as e:
             failed_items.append({"id": item.get("id"), "error": str(e)})
     for page_num, rect in pending:
-        doc[page_num].add_redact_annot(rect, fill=(0, 0, 0))
+        doc[page_num].add_redact_annot(rect, fill=False)
 
     # Lo que hay bajo cada zona también es un término: cubre las censuras manuales (cuyo
     # "text" es una etiqueta) y el texto real bajo cada hallazgo.
@@ -1834,6 +1881,8 @@ def apply(input_path, output_path, items):
             fills = solid_fills_touching(page, zones_by_page[page.number])
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS,
                                   graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED)
+            # Opacidad absoluta, encima de todo y donde se ve cada zona (paint_rects).
+            paint_zones(page, zones_by_page[page.number])
             restore_fills(page, fills, zones_by_page[page.number])
             recompress_redacted_images(doc, page, before)
         if page.number in hidden_by_page:

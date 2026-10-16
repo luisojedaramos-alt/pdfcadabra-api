@@ -145,7 +145,7 @@
   solo de texto: sin relleno, sin tocar imágenes ni trazos (un fondo que sale del CropBox se
   ve). Esas zonas no van a `zones_by_page`: si se llevaran texto visible, lo avisa
   `X-Redact-Text-Loss`. Las palabras llegan sin girar: la zona visible es
-  `page.rect * derotation_matrix`. Una palabra cortada por el borde («procurador» del que solo
+  `unrotated_rect(page)`. Una palabra cortada por el borde («procurador» del que solo
   se ve «procurad», página 65 de dos PDF del corpus del lote 2d) se censura entera, también su
   parte visible, y la página sale en `X-Redact-Text-Loss`: lo perdido es un trozo del término,
   no otro texto (test `TerminoCortadoPorElBorde` en `redact_leaks_test.py`). Con capas OCG, las palabras de todas las capas salen de
@@ -168,7 +168,22 @@
   `item_zone` da por fallida la censura con página negativa o inexistente y con un
   rectángulo invertido, vacío o que no toca la página (MuPDF los aceptaba sin tapar nada).
   Los rectángulos llegan sin girar, como los da `search_for`: se comparan con
-  `page.rect * page.derotation_matrix`. Uno que sale en parte de la página sí vale.
+  `unrotated_rect(page)`. Uno que sale en parte de la página sí vale.
+- Coordenadas con /Rotate y CropBox desplazada (rama fix/censura-rotate-cropbox, 2026-10-17):
+  los rectángulos de search y los manuales de la web (`viewportRectToBackend` en
+  `src/lib/pdf-coords.ts`) llegan en el mismo espacio: página sin girar, origen arriba a la
+  izquierda de lo que se ve (CropBox recortada a la MediaBox) y la y hacia abajo. MuPDF
+  censura bien ahí (texto y píxeles), pero PyMuPDF 1.28.2 tiene dos fallos con /Rotate ≠ 0:
+  `Page.transformation_matrix` es `Matrix(1, 0, 0, -1, 0, alto)` sin el origen de la CropBox
+  (lo usa `Shape`: el negro de `apply_redactions` y los rellenos repintados salían desplazados
+  o fuera de la página), y `derotation_matrix` usa la CropBox sin recortar a la MediaBox (una
+  zona visible se daba por fuera de la página: 422). Por eso las anotaciones van sin relleno
+  (`fill=False`) y el negro lo pinta `paint_zones` tras `apply_redactions`, con `paint_rects`
+  (dibuja con /Rotate 0 mientras tanto, como `_content_bboxlog`), y la zona visible sale de
+  `unrotated_rect` (`page.rect` sin girar). Los píxeles censurados quedan en blanco en la
+  imagen (MuPDF) y el negro va encima. Al actualizar PyMuPDF, comprobarlo con
+  `CensuraConRotateYCropBox` en `redact_test.py` (5 geometrías × 4 rotaciones, búsqueda y
+  manual, texto y escaneo, y rellenos repintados).
 - Trazos (decisión de Luis, 2026-10-07): `REMOVE_IF_TOUCHED` quita entero todo trazo que
   toque una zona (antes, `REMOVE_IF_COVERED`, una firma que entraba y salía quedaba bajo el
   negro). Se aceptan las líneas de tabla que rocen la zona. Un relleno con patrón que la zona

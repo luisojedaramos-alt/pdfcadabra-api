@@ -32,12 +32,13 @@
   (ver Límites por plan): cola 180 s, Comprimir 180 s en total (+30 s de
   verificación), Anonimizar 240 s por proceso. Health check de Docker a `/health`
   cada 30 s.
-- Comprobado en el servidor el 2026-10-16 (`docker inspect` del contenedor,
-  revisión d479837). Revisión actual en producción: d479837 (desplegada el
-  2026-10-16 a las 23:32, lote 2d: la salida de Anonimizar ya no pesa más que la
-  entrada; imagen nueva con Pillow 12.3.0, tests pasados dentro de ella antes de
-  recrear; Caddy sin tocar). Vuelta atrás: imagen `pdfcadabra-api:rollback-e64300a` y
-  `/opt/pdfcadabra/api.old` (e64300a). Primer despliegue con parada ordenada: el
+- Comprobado en el servidor el 2026-10-17 (`docker inspect` del contenedor,
+  revisión 348f0cb). Revisión actual en producción: 348f0cb (desplegada el
+  2026-10-17 a las 00:40, censura en su sitio con /Rotate y CropBox desplazada y
+  verificación por render; tests pasados dentro de la imagen antes de recrear; Caddy sin
+  tocar). Vuelta atrás: imagen `pdfcadabra-api:rollback-d479837` y
+  `/opt/pdfcadabra/api.old` (d479837; la de e64300a sigue como
+  `pdfcadabra-api:rollback-e64300a`). Parada ordenada en los dos últimos despliegues: el
   contenedor viejo recibió solo SIGTERM y salió con 0, sin SIGKILL (`docker events`).
   c4e54da fue el último despliegue que cortó a los 10 s
   (`stop_timeout` 600 comprobado). Al reiniciar Caddy salen siempre los avisos

@@ -210,8 +210,11 @@
   `recompress_redacted_images` la vuelve a codificar como el original (lote 2d, 2026-10-16,
   decisiones de Luis; con Pillow, en `requirements.txt`):
   - JPEG gris y RGB: con las tablas DQT exactas del original y su mismo submuestreo (Pillow,
-    progresivo), o la de MuPDF (calidad estimada por la DQT, siempre 4:4:4) si ocupa menos. Solo
-    con MuPDF, un escaneo 4:2:0 crecía un 11 % (`color-50mb`, el de la incidencia del 15-10).
+    progresivo). Solo con MuPDF, un escaneo 4:2:0 crecía un 11 % (`color-50mb`, el de la
+    incidencia del 15-10). Si no se pueden leer las tablas o el submuestreo (Pillow lee 4:4:4,
+    4:2:2, 4:2:0 y 4:1:1; `_same_layout`), también la de MuPDF (calidad estimada por la DQT,
+    siempre 4:4:4), y la menor. Hasta el 2026-10-16 se hacían siempre las dos: mismos bytes en
+    `color-50mb`, `gris-50mb` y `rgb-scan`, y apply un 22-37 % más lento.
   - JPEG CMYK: con las DQT del original. Se comprueban los colores decodificando con MuPDF
     (`_same_colors`: diferencia media por canal ≤ 8 y sesgo ≤ 2; la buena da 0,1-3,3 y la mal
     interpretada 255), primero tal cual y después con los valores invertidos (marca Adobe o

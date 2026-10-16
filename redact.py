@@ -450,9 +450,10 @@ def words_outside(words, zones, margin=1.0):
 # imagen sustituida como su original, y 1 bit (CCITT, JBIG2...) en CCITT G4 sin pérdida. Los
 # píxeles tapados ya son negros en la copia, así que recomprimir no puede devolver nada de lo
 # censurado. Solo lleva pérdida lo que ya la tenía (lote 2d, 2026-10-15; con Pillow):
-# - JPEG gris y RGB: con las tablas DQT exactas del original y su submuestreo, o la copia de
-#   MuPDF (calidad estimada por la DQT, siempre 4:4:4) si ocupa menos. Solo con MuPDF, un
-#   escaneo 4:2:0 crecía un 11 %.
+# - JPEG gris y RGB: con las tablas DQT exactas del original y su submuestreo (Pillow). Solo si
+#   no se pueden leer o Pillow no reproduce el submuestreo, también la copia de MuPDF (calidad
+#   estimada por la DQT, siempre 4:4:4), y la que ocupe menos. Solo con MuPDF, un escaneo 4:2:0
+#   crecía un 11 %.
 # - JPEG CMYK: con las DQT del original, comprobando los colores al decodificar (_same_colors);
 #   si no pasan, Flate sin pérdida. Antes siempre Flate: ×3,3.
 # - JPEG 2000 sin pérdida (5/3 o en duda, jpx_reversible): JPEG 2000 sin pérdida o Flate, lo que
@@ -714,14 +715,29 @@ def _encode_dct(doc, xref, original_xref, pix):
                 return True
         _restore_raw(doc, xref, raw)
         return False
-    candidates = [pix.tobytes("jpg", jpg_quality=(original and jpeg_quality(original)) or DEFAULT_JPEG_QUALITY)]
+    candidates = []
     if src is not None:
         try:
             candidates.append(_jpeg_like(img, src))
         except Exception as e:  # p. ej. tablas que Pillow no acepta: queda la de MuPDF
             print(f"Aviso en redact.py: JPEG con las tablas del original: {e}", file=sys.stderr)
+    if not candidates or not _same_layout(img, src):
+        # Sin las tablas o el submuestreo del original, también la de MuPDF, y la menor.
+        candidates.append(pix.tobytes("jpg", jpg_quality=(original and jpeg_quality(original)) or DEFAULT_JPEG_QUALITY))
     _store(doc, xref, min(candidates, key=len), "/DCTDecode")
     return True
+
+
+def _same_layout(img, src):
+    """¿Reproduce _jpeg_like las tablas y el submuestreo de src? Entonces basta su JPEG.
+
+    Gris: no hay submuestreo. RGB: Pillow lee y escribe 4:4:4, 4:2:2, 4:2:0 y 4:1:1. Con los
+    escaneos del lote 2d (2026-10-16), solo Pillow da los mismos bytes y apply tarda un 22-37 %
+    menos: la copia de MuPDF no ganaba en ninguno.
+    """
+    if not src.quantization:
+        return False
+    return img.mode == "L" or JpegImagePlugin.get_sampling(src) >= 0
 
 
 def _encode_jpx(doc, xref, original_xref, pix):

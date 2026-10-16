@@ -531,6 +531,30 @@ class TamanoDeSalidaLote2d(unittest.TestCase):
         self.assertEqual(jpeg_sampling(out), (2, 2))  # 4:2:0, como el original
         self.assertLessEqual(os.path.getsize(out), os.path.getsize(src))
 
+    def test_jpeg_con_submuestreo_conocido_no_codifica_tambien_con_mupdf(self):
+        """Con las tablas y el submuestreo del original basta Pillow: la copia de MuPDF (4:4:4)
+        no ganaba en los escaneos del lote 2d y costaba entre un 22 y un 37 % del tiempo de apply."""
+        from unittest import mock
+        for mode, cs, kw in (("RGB", "/DeviceRGB", {"subsampling": 2}), ("L", "/DeviceGray", {})):
+            with self.subTest(mode=mode):
+                src = tmp_path(self, "in.pdf")
+                make_image_pdf(src, [[(encode(scan_image(mode), "JPEG", quality=85, **kw), "/DCTDecode", cs, None)]])
+                tobytes = fitz.Pixmap.tobytes
+                with mock.patch.object(fitz.Pixmap, "tobytes", autospec=True, side_effect=tobytes) as spy:
+                    out = self.apply_zone(src)
+                self.assertFalse([c for c in spy.call_args_list if "jpg" in c.args], spy.call_args_list)
+                self.assertIn("DCTDecode", first_image(out)[0])
+                self.assertLessEqual(os.path.getsize(out), os.path.getsize(src))
+
+    def test_submuestreo_que_pillow_no_lee_tambien_con_mupdf(self):
+        import io
+        from PIL import Image
+        img = scan_image("RGB")
+        src = Image.open(io.BytesIO(encode(img, "JPEG", quality=85)))
+        self.assertTrue(redact._same_layout(img, src))
+        src.layer = [(1, 1, 2, 0), (2, 1, 1, 1), (3, 1, 1, 1)]  # 4:4:0: Pillow no lo reproduce
+        self.assertFalse(redact._same_layout(img, src))
+
     def test_jpeg_cmyk_vuelve_a_jpeg_cmyk_con_sus_colores(self):
         cmyk = scan_image("CMYK")
         for decode in ("", "/Decode [1 0 1 0 1 0 1 0]"):  # Adobe invertido, con /Decode o sin él
